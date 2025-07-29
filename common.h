@@ -8,6 +8,13 @@
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
+#include <functional>
+
+extern "C" {
+#include "lua_src/lua.h"  
+#include "lua_src/lualib.h"
+#include "lua_src/lauxlib.h"
+}
 
 enum KeyCode {
     ARROW_LEFT = 1000,

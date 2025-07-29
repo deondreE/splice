@@ -2,26 +2,305 @@
 #include <sstream>
 #include <algorithm>
 #include "win_console_utils.h"
+#include <iostream>
 #include <Shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 
+///Lua
+int lua_set_status_message(lua_State* L) {
+    // Get the Editor* from Lua's registry or closure (we'll push it into a closure)
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) {
+        return luaL_error(L, "Editor instance not found in upvalue.");
+    }
+
+    // Check arguments: expects (string message)
+    if (!lua_isstring(L, 1)) {
+        return luaL_error(L, "Argument #1 (message) must be a string.");
+    }
+    std::string message = lua_tostring(L, 1);
+
+    editor->statusMessage = message;
+    editor->statusMessageTime = GetTickCount64();
+    return 0; // Number of return values on the Lua stack
+}
+
+int lua_insert_text(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    if (!lua_isstring(L, 1)) {
+        return luaL_error(L, "Argument #1 (text) must be a string.");
+    }
+    std::string text = lua_tostring(L, 1);
+
+    for (char c : text) {
+        editor->insertChar(c);
+    }
+    return 0;
+}
+
+int lua_get_current_line_text(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    std::string line_text = "";
+    if (editor->cursorY >= 0 && editor->cursorY < editor->lines.size()) {
+        line_text = editor->lines[editor->cursorY];
+    }
+    lua_pushstring(L, line_text.c_str());
+    return 1; // Return 1 value (the string)
+}
+
+int lua_get_cursor_x(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->cursorX);
+    return 1;
+}
+
+int lua_get_cursor_y(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->cursorY);
+    return 1;
+}
+
+int lua_get_line_count(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->lines.size());
+    return 1;
+}
+
+int lua_get_current_filename(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushstring(L, editor->filename.c_str());
+    return 1;
+}
+
+int lua_refresh_screen(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    editor->refreshScreen();
+    return 0;
+}
+
+int lua_force_full_redraw(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    for(auto& s : editor->prevDrawnLines) s.assign(editor->screenCols, ' ');
+    editor->prevStatusMessage = "";
+    editor->prevMessageBarMessage = "";
+    return 0;
+}
+
+int lua_get_current_time_ms(lua_State* L) {
+    lua_pushinteger(L, GetTickCount64());
+    return 1;
+}
+
+static const luaL_Reg editor_lib[] = {
+    {"set_status_message", lua_set_status_message},
+    {"insert_text", lua_insert_text},
+    {"get_current_line_text", lua_get_current_line_text},
+    {"get_cursor_x", lua_get_cursor_x},
+    {"get_cursor_y", lua_get_cursor_y},
+    {"get_line_count", lua_get_line_count},
+    {"get_current_filename", lua_get_current_filename},
+    {"refresh_screen", lua_refresh_screen},
+    {"force_full_redraw", lua_force_full_redraw},
+    {"get_current_time_ms", lua_get_current_time_ms},
+    {NULL, NULL}  // Sentinel
+};
+///
+
 Editor::Editor() : cursorX(0), cursorY(0), screenRows(0), screenCols(0),
     rowOffset(0), colOffset(0), lineNumberWidth(0),
-    statusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save | Ctrl-O = open"),
+    statusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save | Ctrl-O = open | Ctrl-E = explorer | Ctrl-F = find | Ctrl-L = plugins"),
     statusMessageTime(GetTickCount64()),
     prevStatusMessage(""), prevMessageBarMessage(""), dirty(false),
     mode(EDIT_MODE), selectedFileIndex(0), fileExporerScrollOffset(0),
     currentMatchIndex(-1), originalCursorX(0), originalCursorY(0),
-    originalColOffset(0), originalRowOffset(0)
+    originalRowOffset(0), originalColOffset(0), L(nullptr) // Initialize Lua state to null
 {
     lines.push_back("");
     updateScreenSize();
     prevDrawnLines.resize(screenRows - 2);
     for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
-    
+
     char buffer[MAX_PATH];
     GetCurrentDirectoryA(MAX_PATH, buffer);
     currentDirPath = buffer;
+
+    initializeLua();
+    loadLuaPlugins(); 
+}
+
+Editor::~Editor() {
+    finalizeLua();
+}
+
+void Editor::initializeLua() {
+    L = luaL_newstate(); // Create new Lua state
+    if (!L) {
+        std::cerr << "Error: Failed to create Lua state." << std::endl;
+        exit(1);
+    }
+
+    luaL_openlibs(L); // Open all standard Lua libraries (base, table, io, string, math, debug etc.)
+
+    // Expose Editor API to Lua
+    exposeEditorToLua();
+
+    statusMessage = "Lua interpreter initialized.";
+    statusMessageTime = GetTickCount64();
+}
+
+void Editor::finalizeLua() {
+    if (L) {
+        lua_close(L); // Close Lua state, cleans up everything
+        L = nullptr;
+    }
+    statusMessage = "Lua interpreter finalized.";
+    statusMessageTime = GetTickCount64();
+}
+
+void Editor::exposeEditorToLua() {
+    // Create a new table (like a Python module)
+    lua_newtable(L);
+    int editor_api_table_idx = lua_gettop(L); // Get its index on the stack
+
+    // Push the 'this' pointer to Editor onto the stack as userdata.
+    // This userdata will be used as an 'upvalue' for all functions in editor_lib.
+    lua_pushlightuserdata(L, this); // 'light' means Lua doesn't manage its memory
+
+    // Register all C functions in editor_lib into the new table
+    // For each function in editor_lib, lua_pushcclosure pushes the C function
+    // along with 1 upvalue (the Editor* userdata)
+    luaL_setfuncs(L, editor_lib, 1);
+
+    // Set the table as a global variable named 'editor_api'
+    lua_setglobal(L, "editor_api");
+
+    // Add plugin directory to Lua's package.path
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "path"); // Get package.path
+    std::string current_path = lua_tostring(L, -1);
+    current_path += ";./plugins/?.lua"; // Add plugins dir relative to executable
+    lua_pop(L, 1); // Pop old path
+    lua_pushstring(L, current_path.c_str());
+    lua_setfield(L, -2, "path"); // Set new path
+    lua_pop(L, 1); // Pop package table
+
+    // Check for errors
+    if (lua_status(L) != LUA_OK) {
+        std::cerr << "Error exposing Editor to Lua: " << lua_tostring(L, -1) << std::endl;
+        lua_pop(L, 1); // Pop error message
+    }
+}
+
+void Editor::loadLuaPlugins(const std::string& pluginDir) {
+    if (!L) {
+        statusMessage = "Lua interpreter not initialized, cannot load plugins.";
+        statusMessageTime = GetTickCount64();
+        return;
+    }
+    statusMessage = "Loading Lua plugins from '" + pluginDir + "'...";
+    statusMessageTime = GetTickCount64();
+
+    CreateDirectoryA(pluginDir.c_str(), NULL); // Ensure plugins directory exists
+
+    WIN32_FIND_DATAA findFileData;
+    HANDLE hFind = FindFirstFileA((pluginDir + "\\*.lua").c_str(), &findFileData);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        statusMessage = "No Lua plugins found in '" + pluginDir + "'";
+        statusMessageTime = GetTickCount64();
+        return;
+    }
+
+    do {
+        std::string luaFileName = findFileData.cFileName;
+        if (luaFileName == "." || luaFileName == "..") continue;
+
+        std::string luaFilePath = pluginDir + "\\" + luaFileName;
+
+        // Load and execute the Lua script
+        int status = luaL_dofile(L, luaFilePath.c_str());
+        if (status != LUA_OK) {
+            std::string error_msg = lua_tostring(L, -1);
+            lua_pop(L, 1); // Pop error message
+            statusMessage = "Error loading Lua plugin '" + luaFileName + "': " + error_msg;
+            statusMessageTime = GetTickCount64();
+            std::cerr << "Lua Error: " << error_msg << std::endl;
+        } else {
+            statusMessage = "Loaded Lua plugin: " + luaFileName;
+            statusMessageTime = GetTickCount64();
+
+            // Optional: Call an 'on_load' function in the plugin if it exists
+            lua_getglobal(L, "on_load"); // Try to get a global 'on_load' function from the plugin
+            if (lua_isfunction(L, -1)) {
+                // Call it (no arguments)
+                status = lua_pcall(L, 0, 0, 0); // 0 args, 0 results, 0 error func
+                if (status != LUA_OK) {
+                    std::string error_msg = lua_tostring(L, -1);
+                    lua_pop(L, 1);
+                    statusMessage = "Error in plugin 'on_load': " + error_msg;
+                    statusMessageTime = GetTickCount64();
+                    std::cerr << "Lua on_load Error: " << error_msg << std::endl;
+                }
+            } else {
+                lua_pop(L, 1); // Pop nil if on_load not found
+            }
+        }
+    } while (FindNextFileA(hFind, &findFileData) != 0);
+
+    FindClose(hFind);
+    statusMessage = "Finished loading Lua plugins.";
+    statusMessageTime = GetTickCount64();
+}
+
+bool Editor::executeLuaPluginCommand(const std::string& pluginName, const std::string& commandName) {
+    if (!L) {
+        statusMessage = "Lua interpreter not initialized, cannot execute plugin command.";
+        statusMessageTime = GetTickCount64();
+        return false;
+    }
+    
+    // Attempt to get the function from the global scope (assuming plugins define global functions)
+    // Or if plugins create a table/module, you'd do:
+    // lua_getglobal(L, pluginName.c_str());
+    // if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; } // Not a table
+    // lua_getfield(L, -1, commandName.c_str());
+    // lua_remove(L, -2); // Pop the table
+    
+    // For simplicity, let's assume `commandName` is a global function directly
+    lua_getglobal(L, commandName.c_str()); // Push function onto stack
+
+    if (!lua_isfunction(L, -1)) {
+        std::string type_name = lua_typename(L, lua_type(L, -1));
+        lua_pop(L, 1); // Pop non-function value
+        statusMessage = "Command '" + commandName + "' not found or not a function in Lua. Type was: " + type_name;
+        statusMessageTime = GetTickCount64();
+        return false;
+    }
+
+    // Call the Lua function (0 args, 0 results, 0 error handler)
+    int status = lua_pcall(L, 0, 0, 0);
+    if (status != LUA_OK) {
+        std::string error_msg = lua_tostring(L, -1);
+        lua_pop(L, 1); // Pop error message
+        statusMessage = "Error executing Lua command '" + commandName + "': " + error_msg;
+        statusMessageTime = GetTickCount64();
+        std::cerr << "Lua Command Error: " << error_msg << std::endl;
+        return false;
+    }
+
+    statusMessage = "Lua command '" + commandName + "' executed.";
+    statusMessageTime = GetTickCount64();
+    return true;
 }
 
 void Editor::calculateLineNumberWidth()

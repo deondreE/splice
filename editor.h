@@ -41,6 +41,8 @@ struct Editor {
 	std::string statusMessage;
 	ULONGLONG statusMessageTime;
 
+	lua_State* L;
+
 	std::vector<std::string> prevDrawnLines;
 	std::string prevStatusMessage;
 	std::string prevMessageBarMessage;
@@ -59,6 +61,7 @@ struct Editor {
 	std::string promptMessage;
 
 	Editor();
+	~Editor();
 
 	void updateScreenSize();
 	void refreshScreen();
@@ -82,6 +85,12 @@ struct Editor {
 	void findPrevious();
 
 	bool promptUser(const std::string& prompt, int input_c, std::string& result);
+
+	void initializeLua();
+	void finalizeLua();
+	void loadLuaPlugins(const std::string& pluginDir = "plugins");
+	bool executeLuaPluginCommand(const std::string& pluginName, const std::string& commandName);
+	void exposeEditorToLua();
 
 private:
 	void calculateLineNumberWidth();
