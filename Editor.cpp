@@ -23,6 +23,23 @@ Editor::Editor() : cursorX(0), cursorY(0), screenRows(0), screenCols(0),
     currentDirPath = buffer;
 }
 
+void Editor::calculateLineNumberWidth()
+{
+    size_t effectiveLineNumbers = std::max(static_cast<size_t>(1), lines.size());
+    int numLines = static_cast<int>(effectiveLineNumbers);
+
+    int digits = 0;
+    if (numLines == 0) digits = 1;
+    else {
+        int temp = numLines;
+        while (temp > 0) {
+            temp /= 10;
+            ++digits;
+        }
+    }
+    lineNumberWidth = digits + 1;
+}
+
 void Editor::updateScreenSize() {
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi); // Use GetStdHandle locally
@@ -49,65 +66,51 @@ void Editor::updateScreenSize() {
     }
 }
 
-void Editor::calculateLineNumberWidth() {
-    size_t effectiveNumLines = std::max(static_cast<size_t>(1), lines.size());
-    int numLines = static_cast<int>(effectiveNumLines);
-
-    int digits = 0;
-    if (numLines == 0) digits = 1;
-    else {
-        int temp = numLines;
-        while (temp > 0) {
-            temp /= 10;
-            digits++;
-        }
-    }
-    lineNumberWidth = digits + 1;
-}
-
 void Editor::drawScreenContent() {
     int effectiveScreenCols = screenCols - lineNumberWidth;
 
-    for (int i = 0; i < screenRows - 2; ++i) {
+    for (int i = 0; i < screenRows - 2; ++i) { // Reserve 2 lines for status/message bar
+        setCursorPosition(0, i); // Cursor for current screen row
+
         int fileRow = rowOffset + i;
         std::string lineToDraw; // The complete string for this screen row (line number + text)
 
-        // ... line number drawing logic ...
+        // --- 1. Construct the line to be drawn for the current frame ---
         std::ostringstream ss_lineNumber;
         if (fileRow < lines.size()) {
             ss_lineNumber << std::setw(lineNumberWidth - 1) << (fileRow + 1) << " ";
-        }
-        else {
-            ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~";
+        } else {
+            ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~"; // Empty line beyond file content
         }
         lineToDraw += ss_lineNumber.str();
 
         std::string renderedTextContent = "";
         if (fileRow < lines.size()) {
-            // Get the line with tabs expanded
             std::string fullRenderedLine = getRenderedLine(fileRow);
 
-            // Calculate effective start and end for drawing *from the rendered line*
-            int startChar = colOffset;
-            int endChar = colOffset + effectiveScreenCols;
+            int startCharInRenderedLine = colOffset;
+            int endCharInRenderedLine = colOffset + effectiveScreenCols;
 
-            if (startChar < 0) startChar = 0;
-            if (startChar > fullRenderedLine.length()) startChar = fullRenderedLine.length();
+            if (startCharInRenderedLine < 0) startCharInRenderedLine = 0;
+            if (startCharInRenderedLine > (int)fullRenderedLine.length()) startCharInRenderedLine = (int)fullRenderedLine.length();
 
-            if (endChar > fullRenderedLine.length()) endChar = fullRenderedLine.length();
+            if (endCharInRenderedLine > (int)fullRenderedLine.length()) endCharInRenderedLine = (int)fullRenderedLine.length();
+            if (endCharInRenderedLine < 0) endCharInRenderedLine = 0;
 
-            if (endChar > startChar) {
-                renderedTextContent = fullRenderedLine.substr(startChar, endChar - startChar);
+            if (endCharInRenderedLine > startCharInRenderedLine) {
+                renderedTextContent = fullRenderedLine.substr(startCharInRenderedLine, endCharInRenderedLine - startCharInRenderedLine);
             }
         }
         lineToDraw += renderedTextContent;
 
-        // Fill remaining part of the line with spaces up to screen width
+        // Fill remaining part of the line with spaces up to the screen's full width
         lineToDraw += std::string(screenCols - lineToDraw.length(), ' ');
 
-        // --- Only redraw if the line content has changed ---
+
+        // --- 2. Compare with previous frame and draw only if changed ---
         if (i >= prevDrawnLines.size() || prevDrawnLines[i] != lineToDraw) {
-            setCursorPosition(0, i);
+            setCursorPosition(0, i); // Move cursor to start of current screen row
+            resetTextColor();
             writeStringAt(0, i, lineToDraw);
             if (i < prevDrawnLines.size()) {
                 prevDrawnLines[i] = lineToDraw;
