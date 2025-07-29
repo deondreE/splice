@@ -5,13 +5,14 @@
 #include <Shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 
-// Editor Constructor
 Editor::Editor() : cursorX(0), cursorY(0), screenRows(0), screenCols(0),
     rowOffset(0), colOffset(0), lineNumberWidth(0),
     statusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save | Ctrl-O = open"),
     statusMessageTime(GetTickCount64()),
     prevStatusMessage(""), prevMessageBarMessage(""), dirty(false),
-    mode(EDIT_MODE), selectedFileIndex(0), fileExporerScrollOffset(0)
+    mode(EDIT_MODE), selectedFileIndex(0), fileExporerScrollOffset(0),
+    currentMatchIndex(-1), originalCursorX(0), originalCursorY(0),
+    originalColOffset(0), originalRowOffset(0)
 {
     lines.push_back("");
     updateScreenSize();
@@ -69,18 +70,17 @@ void Editor::updateScreenSize() {
 void Editor::drawScreenContent() {
     int effectiveScreenCols = screenCols - lineNumberWidth;
 
-    for (int i = 0; i < screenRows - 2; ++i) { // Reserve 2 lines for status/message bar
-        setCursorPosition(0, i); // Cursor for current screen row
+    for (int i = 0; i < screenRows - 2; ++i) {
+        setCursorPosition(0, i);
 
         int fileRow = rowOffset + i;
-        std::string lineToDraw; // The complete string for this screen row (line number + text)
+        std::string lineToDraw;
 
-        // --- 1. Construct the line to be drawn for the current frame ---
         std::ostringstream ss_lineNumber;
         if (fileRow < lines.size()) {
             ss_lineNumber << std::setw(lineNumberWidth - 1) << (fileRow + 1) << " ";
         } else {
-            ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~"; // Empty line beyond file content
+            ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~";
         }
         lineToDraw += ss_lineNumber.str();
 
@@ -101,19 +101,61 @@ void Editor::drawScreenContent() {
                 renderedTextContent = fullRenderedLine.substr(startCharInRenderedLine, endCharInRenderedLine - startCharInRenderedLine);
             }
         }
-        lineToDraw += renderedTextContent;
 
-        // Fill remaining part of the line with spaces up to the screen's full width
-        lineToDraw += std::string(screenCols - lineToDraw.length(), ' ');
+        bool lineHasHighlight = false;
+        if (!searchQuery.empty() && currentMatchIndex != -1) {
+            // Check if any match is on this fileRow
+            for (const auto& match : searchResults) {
+                if (match.first == fileRow) {
+                    lineHasHighlight = true;
+                    break;
+                }
+            }
+        }
+        
+        std::string fullLineContentForDiff = lineToDraw + renderedTextContent + std::string(screenCols - (lineToDraw.length() + renderedTextContent.length()), ' ');
 
+        if (lineHasHighlight || i >= prevDrawnLines.size() || prevDrawnLines[i] != fullLineContentForDiff) {
+            setCursorPosition(0, i);
+            resetTextColor(); // Default color for text area
 
-        // --- 2. Compare with previous frame and draw only if changed ---
-        if (i >= prevDrawnLines.size() || prevDrawnLines[i] != lineToDraw) {
-            setCursorPosition(0, i); // Move cursor to start of current screen row
-            resetTextColor();
-            writeStringAt(0, i, lineToDraw);
+            // Draw line number part first
+            writeStringAt(0, i, lineToDraw.substr(0, lineNumberWidth));
+
+            // Now iterate through the visible part of the rendered text content for highlighting
+            int currentRenderedCol = lineNumberWidth;
+            for (int k = 0; k < renderedTextContent.length(); ++k) {
+                char ch = renderedTextContent[k];
+                bool isHighlight = false;
+                
+                // Check if current char is part of the highlighted search result
+                if (!searchQuery.empty() && currentMatchIndex != -1 && fileRow == searchResults[currentMatchIndex].first) {
+                    // Convert search result char index to rendered index to compare
+                    int matchRenderedStart = cxToRx(fileRow, searchResults[currentMatchIndex].second);
+                    int matchRenderedEnd = cxToRx(fileRow, searchResults[currentMatchIndex].second + searchQuery.length());
+
+                    // Relative to visible screen (colOffset)
+                    if (currentRenderedCol - lineNumberWidth + colOffset >= matchRenderedStart &&
+                        currentRenderedCol - lineNumberWidth + colOffset < matchRenderedEnd) {
+                        isHighlight = true;
+                    }
+                }
+
+                if (isHighlight) {
+                    setTextColor(BG_YELLOW | BLACK); // Highlight: Black on Yellow
+                } else {
+                    resetTextColor(); // Default color
+                }
+                writeStringAt(currentRenderedCol, i, std::string(1, ch)); // Write one character
+                currentRenderedCol++;
+            }
+            resetTextColor(); // Reset after text
+            
+            // Clear rest of the line to ensure old highlights are gone
+            writeStringAt(currentRenderedCol, i, std::string(screenCols - currentRenderedCol, ' '));
+            
             if (i < prevDrawnLines.size()) {
-                prevDrawnLines[i] = lineToDraw;
+                prevDrawnLines[i] = fullLineContentForDiff; // Update prevDrawnLines with the full rendered line (no colors)
             }
         }
     }
@@ -121,6 +163,136 @@ void Editor::drawScreenContent() {
     drawMessageBar();
 }
 
+void Editor::startSearch() {
+    originalCursorX = cursorX; // Save original cursor position
+    originalCursorY = cursorY;
+    originalRowOffset = rowOffset;
+    originalColOffset = colOffset;
+
+    mode = PROMPT_MODE;
+    promptMessage = "Search: ";
+    searchQuery = ""; // Clear previous search query
+    searchResults.clear(); // Clear previous results
+    currentMatchIndex = -1; // No match selected yet
+    statusMessage = "Enter search term. ESC to cancel, Enter to search.";
+    statusMessageTime = GetTickCount64();
+
+    // Invalidate prevDrawnLines to ensure prompt is drawn fresh
+    for(auto& s : prevDrawnLines) s.assign(screenCols, ' ');
+    prevStatusMessage = "";
+    prevMessageBarMessage = "";
+    clearScreen(); // Force full screen redraw to show prompt cleanly
+}
+
+void Editor::performSearch() {
+    searchResults.clear();
+    currentMatchIndex = -1;
+
+    if (searchQuery.empty()) {
+        statusMessage = "Search cancelled or empty.";
+        statusMessageTime = GetTickCount64();
+        mode = EDIT_MODE; // Exit search mode if query is empty
+        cursorX = originalCursorX; // Restore cursor
+        cursorY = originalCursorY;
+        rowOffset = originalRowOffset; // Restore scroll
+        colOffset = originalColOffset;
+        return;
+    }
+
+    // Iterate through lines to find all matches
+    for (int r = 0; r < lines.size(); ++r) {
+        size_t pos = lines[r].find(searchQuery, 0);
+        while (pos != std::string::npos) {
+            searchResults.push_back({r, (int)pos});
+            pos = lines[r].find(searchQuery, pos + 1); // Find next occurrence after current match
+        }
+    }
+
+    if (searchResults.empty()) {
+        statusMessage = "No matches found for '" + searchQuery + "'";
+        statusMessageTime = GetTickCount64();
+        mode = EDIT_MODE; // No matches, go back to edit mode
+        cursorX = originalCursorX; // Restore cursor
+        cursorY = originalCursorY;
+        rowOffset = originalRowOffset; // Restore scroll
+        colOffset = originalColOffset;
+        return;
+    }
+
+    // Found matches. Go to the first one.
+    currentMatchIndex = 0;
+    statusMessage = "Found " + std::to_string(searchResults.size()) + " matches. (N)ext (P)rev";
+    statusMessageTime = GetTickCount64();
+
+    // Move cursor and scroll to the first match
+    cursorY = searchResults[currentMatchIndex].first;
+    cursorX = searchResults[currentMatchIndex].second;
+    
+    // Adjust scroll to make sure the found match is visible
+    scroll(); // This should adjust rowOffset/colOffset
+    
+    mode = EDIT_MODE; // Exit search prompt mode
+}
+
+
+void Editor::findNext() {
+    if (searchResults.empty()) return;
+
+    currentMatchIndex = (currentMatchIndex + 1) % searchResults.size();
+
+    // Move cursor and scroll to the new match
+    cursorY = searchResults[currentMatchIndex].first;
+    cursorX = searchResults[currentMatchIndex].second;
+    scroll(); // Adjust scroll
+
+    statusMessage = "Match " + std::to_string(currentMatchIndex + 1) + " of " + std::to_string(searchResults.size());
+    statusMessageTime = GetTickCount64();
+}
+
+void Editor::findPrevious() {
+    if (searchResults.empty()) return;
+
+    currentMatchIndex--;
+    if (currentMatchIndex < 0) {
+        currentMatchIndex = searchResults.size() - 1;
+    }
+
+    cursorY = searchResults[currentMatchIndex].first;
+    cursorX = searchResults[currentMatchIndex].second;
+    scroll();
+
+    statusMessage = "Match " + std::to_string(currentMatchIndex + 1) + " of " + std::to_string(searchResults.size());
+    statusMessageTime = GetTickCount64();
+}
+
+bool Editor::promptUser(const std::string& prompt, int input_c, std::string& result) {
+    if (input_c == 13) { // Enter
+        mode = EDIT_MODE; // Exit prompt mode
+        return true; // Success
+    } else if (input_c == 27) { // Escape
+        mode = EDIT_MODE; // Exit prompt mode
+        result.clear(); // Clear the input
+        statusMessage = "Operation cancelled.";
+        statusMessageTime = GetTickCount64();
+        cursorX = originalCursorX; // Restore cursor
+        cursorY = originalCursorY;
+        rowOffset = originalRowOffset; // Restore scroll
+        colOffset = originalColOffset;
+        return false; // Cancelled
+    } else if (input_c == 8) { // Backspace
+        if (!result.empty()) {
+            result.pop_back();
+        }
+    } else if (input_c >= 32 && input_c <= 126) { // Printable characters
+        result += static_cast<char>(input_c);
+    }
+    // Update the message bar with the current prompt and input
+    statusMessage = prompt + result;
+    statusMessageTime = GetTickCount64(); // Keep message alive while typing
+
+    // Return false to indicate prompt mode is still active
+    return false;
+}
 
 void Editor::drawStatusBar() {
     std::string currentStatus;
@@ -679,12 +851,11 @@ void Editor::drawFileExplorer() {
 
 void Editor::refreshScreen() {
     updateScreenSize();
-    
-    if (mode == EDIT_MODE) {
+
+    if (mode == EDIT_MODE || mode == PROMPT_MODE) { // PROMPT_MODE also uses the editor display
         scroll();
         drawScreenContent();
-    }
-    else {
+    } else if (mode == FILE_EXPLORER_MODE) {
         drawFileExplorer();
     }
 
@@ -695,10 +866,11 @@ void Editor::refreshScreen() {
         int finalRenderedCursorX = lineNumberWidth + (cxToRx(cursorY, cursorX) - colOffset);
         int finalRenderedCursorY = cursorY - rowOffset;
         setCursorPosition(finalRenderedCursorX, finalRenderedCursorY);
+    } else if (mode == PROMPT_MODE) {
+        // Place cursor at the end of the prompt in the message bar
+        setCursorPosition(promptMessage.length() + searchQuery.length(), screenRows - 1);
     }
-    else { // FILE_EXPLORER_MODE: Cursor is implied by selection highlight
-        // Cursor isn't actively placed in text area in file explorer mode.
-        // We could place it next to the selected item if desired.
-        setCursorPosition(0, selectedFileIndex - fileExporerScrollOffset);
+    else { 
+        setCursorPosition(0, (selectedFileIndex - fileExporerScrollOffset) + (screenRows - 2));
     }
 }

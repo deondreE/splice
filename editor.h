@@ -10,6 +10,7 @@
 enum EditorMode {
 	EDIT_MODE,
 	FILE_EXPLORER_MODE,
+	PROMPT_MODE,
 };
 
 struct DirEntry {
@@ -50,6 +51,13 @@ struct Editor {
 	int selectedFileIndex;
 	int fileExporerScrollOffset;
 
+	std::string searchQuery;
+	std::vector<std::pair<int, int>> searchResults;
+	int currentMatchIndex;
+	int originalCursorX, originalCursorY;
+	int originalRowOffset, originalColOffset;
+	std::string promptMessage;
+
 	Editor();
 
 	void updateScreenSize();
@@ -67,6 +75,13 @@ struct Editor {
 	void populateDirectoryEntries(const std::string& path);
 	void moveFileExplorerSelection(int key);
 	void handleFileExplorerEnter();
+
+	void startSearch();
+	void  performSearch();
+	void findNext();
+	void findPrevious();
+
+	bool promptUser(const std::string& prompt, int input_c, std::string& result);
 
 private:
 	void calculateLineNumberWidth();
