@@ -1361,6 +1361,11 @@ void Editor::drawStatusBar() {
     std::string currentStatus;
     std::string filename_display = filename.empty() ? "[No Name]" : filename;
     currentStatus += filename_display;
+
+    if (isDirty()) {
+        currentStatus += "*";
+    }
+
     currentStatus += " - " + std::to_string(lines.size()) + " lines";
 
     std::string cursor_info = std::to_string(cursorY + 1) + "/" + std::to_string(lines.size());

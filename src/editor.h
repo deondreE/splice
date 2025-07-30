@@ -119,7 +119,7 @@ public:
 	void deleteForwardChar();
 	bool openFile(const std::string& path);
 	bool saveFile();
-	bool isDirty() const { return dirty; }
+	bool isDirty() const { return dirty; };
 
 	void toggleFileExplorer();
 	void populateDirectoryEntries(const std::string& path);
