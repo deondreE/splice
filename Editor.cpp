@@ -6,6 +6,8 @@
 #include <Shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 
+DWORD WINAPI TerminalOutputReaderThread(LPVOID lpParam);
+
 ///Lua
 int lua_set_status_message(lua_State* L) {
     // Get the Editor* from Lua's registry or closure (we'll push it into a closure)
@@ -116,14 +118,39 @@ static const luaL_Reg editor_lib[] = {
 };
 ///
 
-Editor::Editor() : cursorX(0), cursorY(0), screenRows(0), screenCols(0),
-    rowOffset(0), colOffset(0), lineNumberWidth(0),
+Editor::Editor() : 
+    cursorX(0), 
+    cursorY(0), 
+    screenRows(0), 
+    screenCols(0),
+    rowOffset(0), 
+    colOffset(0), 
+    lineNumberWidth(0),
     statusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save | Ctrl-O = open | Ctrl-E = explorer | Ctrl-F = find | Ctrl-L = plugins"),
     statusMessageTime(GetTickCount64()),
-    prevStatusMessage(""), prevMessageBarMessage(""), dirty(false),
-    mode(EDIT_MODE), selectedFileIndex(0), fileExporerScrollOffset(0),
-    currentMatchIndex(-1), originalCursorX(0), originalCursorY(0),
-    originalRowOffset(0), originalColOffset(0), L(nullptr) // Initialize Lua state to null
+    prevStatusMessage(""), 
+    prevMessageBarMessage(""), 
+    dirty(false),
+    mode(EDIT_MODE), 
+    selectedFileIndex(0),
+    fileExplorerScrollOffset(0),
+    currentMatchIndex(-1), 
+    originalCursorX(0), 
+    originalCursorY(0),
+    originalRowOffset(0), 
+    originalColOffset(0), 
+    L(nullptr),
+    terminalActive(false),
+    terminalCursorX(0),
+    terminalScrollOffset(0),
+    terminalHeight(0),
+    terminalWidth(0),
+    hChildStdinRead(NULL), hChildStdinWrite(NULL), hChildStdoutRead(NULL), hChildStdoutWrite(NULL),
+    currentFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE), // Default white
+    currentBgColor(0),
+    currentBold(false),
+    defaultFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE),
+    defaultBgColor(0)
 {
     lines.push_back("");
     updateScreenSize();
@@ -134,12 +161,23 @@ Editor::Editor() : cursorX(0), cursorY(0), screenRows(0), screenCols(0),
     GetCurrentDirectoryA(MAX_PATH, buffer);
     currentDirPath = buffer;
 
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+        defaultFgColor = csbi.wAttributes & 0x0F;
+        defaultBgColor = csbi.wAttributes & 0x0F;
+        currentFgColor = defaultFgColor;
+        currentBgColor = defaultBgColor;
+    }
+
+    clearTerminalBuffer();
+
     initializeLua();
     loadLuaPlugins(); 
 }
 
 Editor::~Editor() {
     finalizeLua();
+    stopTerminal();
 }
 
 void Editor::initializeLua() {
@@ -929,7 +967,7 @@ void Editor::toggleFileExplorer() {
         statusMessageTime = GetTickCount64();
         populateDirectoryEntries(currentDirPath); // Populate entries when entering mode
         selectedFileIndex = 0; // Reset selection
-        fileExporerScrollOffset = 0; // Reset scroll
+        fileExplorerScrollOffset = 0; // Reset scroll
         clearScreen(); // Force full redraw when changing modes
         for (auto& s : prevDrawnLines) s.assign(screenCols, ' '); // Invalidate text editor view
     }
@@ -1011,11 +1049,11 @@ void Editor::moveFileExplorerSelection(int key) {
     }
 
     // Adjust scroll offset
-    if (selectedFileIndex < fileExporerScrollOffset) {
-        fileExporerScrollOffset = selectedFileIndex;
+    if (selectedFileIndex < fileExplorerScrollOffset) {
+        fileExplorerScrollOffset = selectedFileIndex;
     }
-    if (selectedFileIndex >= fileExporerScrollOffset + (screenRows - 4)) {
-        fileExporerScrollOffset = selectedFileIndex - (screenRows - 4) + 1;
+    if (selectedFileIndex >= fileExplorerScrollOffset + (screenRows - 4)) {
+        fileExplorerScrollOffset = selectedFileIndex - (screenRows - 4) + 1;
     }
 
     if (oldSelectedFileIndex != selectedFileIndex) {
@@ -1042,7 +1080,7 @@ void Editor::handleFileExplorerEnter() {
         // Change directory
         populateDirectoryEntries(newPath);
         selectedFileIndex = 0; // Reset selection in new directory
-        fileExporerScrollOffset = 0;
+        fileExplorerScrollOffset = 0;
         clearScreen(); // Full refresh after CD
     }
     else {
@@ -1069,7 +1107,7 @@ void Editor::drawFileExplorer() {
 
     for (int i = 0; i < visibleRows; ++i) {
         setCursorPosition(0, startRow + i);
-        int entryIndex = fileExporerScrollOffset + i;
+        int entryIndex = fileExplorerScrollOffset + i;
 
         if (entryIndex < directoryEntries.size()) {
             const DirEntry& entry = directoryEntries[entryIndex];
@@ -1128,6 +1166,469 @@ void Editor::drawFileExplorer() {
     }
 }
 
+// Terminal
+void Editor::toggleTerminal() {
+    if (mode == TERMINAL_MODE) {
+        mode = EDIT_MODE;
+        stopTerminal();
+        statusMessage = "Edit Mode: Ctrl-Q = quit | Ctrl-S = save | Ctrl-o = open | Ctrl-E = fileexplorer";
+        statusMessageTime = GetTickCount64();
+    } else {
+        mode = TERMINAL_MODE;
+        startTerminal();
+        statusMessage = "Temrinal Mode: Ctrl-T to close";
+        statusMessageTime = GetTickCount64();
+    }
+    clearScreen();
+    for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
+    prevStatusMessage = "";
+    prevMessageBarMessage = "";
+}
+
+void Editor::startTerminal() {
+    if (piProcInfo.hProcess != NULL) {
+        stopTerminal();
+    }
+
+    ZeroMemory(&piProcInfo, sizeof(piProcInfo));
+
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);   
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    // create pipe for stdout.
+    if (!CreatePipe(&hChildStdoutRead, &hChildStdoutWrite, &saAttr, 0)) {
+        statusMessage = "Error: Stdout pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
+        statusMessageTime = GetTickCount64(); 
+        return;
+    }
+    // ensure the read handle is not inherited.
+    if (!SetHandleInformation(hChildStdoutRead, HANDLE_FLAG_INHERIT, 0)) {
+        statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
+        statusMessageTime = GetTickCount64(); 
+        return;
+    }
+
+    // Create a pipe for stdin
+    if (!CreatePipe(&hChildStdinRead, &hChildStdinWrite, &saAttr, 0)) {
+        statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) = ")";
+        statusMessageTime = GetTickCount64();
+        CloseHandle(hChildStdinRead); 
+        CloseHandle(hChildStdinWrite);
+        CloseHandle(hChildStdoutRead); 
+        CloseHandle(hChildStdoutWrite);
+        return;
+    }
+
+    // setup a start for child process
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdError = hChildStdoutWrite;
+    si.hStdOutput = hChildStdoutWrite;
+    si.hStdInput = hChildStdinRead;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    const char* shell_path = "cmd.exe";
+    char commandLine[MAX_PATH];
+    sprintf_s(commandLine, MAX_PATH, "%s", shell_path);
+
+    BOOL success = CreateProcessA(
+        NULL,           // lpApplicationName
+        commandLine,    // lpCommandLine
+        NULL,           // lpProcessAttributes
+        NULL,           // lpThreadAttributes
+        TRUE,           // bInheritHandles (VERY IMPORTANT for pipe redirection)
+        CREATE_NEW_CONSOLE | NORMAL_PRIORITY_CLASS,
+        NULL,           // lpEnvironment
+        NULL,           // lpCurrentDirectory
+        &si,            // lpStartupInfo
+        &piProcInfo     // lpProcessInformation
+    );
+
+    if (!success) {
+        statusMessage = "Error: Failed to create child process. (GLE: " + std::to_string(GetLastError()) + ")";
+        statusMessageTime = GetTickCount64();
+        
+        CloseHandle(hChildStdinRead); CloseHandle(hChildStdinWrite);
+        CloseHandle(hChildStdoutRead); CloseHandle(hChildStdoutWrite);
+        return;
+    }
+
+    CloseHandle(hChildStdinRead);
+    CloseHandle(hChildStdinWrite);
+    
+    terminalActive = true;
+    CreateThread(NULL, 0, TerminalOutputReaderThread, this, 0, NULL);
+    
+    statusMessage = "Terminal Started. Shell: " + std::string(shell_path);
+    statusMessageTime = GetTickCount64();
+
+    clearTerminalBuffer();
+    terminalCursorX = 0;
+    terminalCursorY = 0;
+    terminalScrollOffset = 0;
+    currentFgColor = defaultFgColor;
+    currentBgColor = defaultBgColor;
+    currentBold = false;
+    ansiSGRParams.clear();
+    asiEscapeBuffe.clear();
+
+    resizeTerminal(screenCols, screenRows - 2);
+}
+
+void Editor::stopTerminal() {
+    if (!terminalActive) return;
+    terminalActive = false;
+
+    if (piProcInfo.hProcess != NULL) {
+        TerminateProcess(piProcInfo.hProcess, 0);
+        CloseHandle(piProcInfo.hProcess);
+        CloseHandle(piProcInfo.hThread);
+        ZeroMemory(&piProcInfo, sizeof(piProcInfo));
+    }
+
+    if (hChildStdinWrite != NULL) { CloseHandle(hChildStdinWrite); hChildStdinWrite = NULL; }
+    if (hChildStdoutRead != NULL) { CloseHandle(hChildStdoutRead); hChildStdoutRead = NULL; }
+
+    statusMessage = "Terminal stopped.";
+    statusMessageTime = GetTickCount64();
+}
+
+DWORD WINAPI TerminalOutputReaderThread(LPVOID lpParam) {
+    Editor* editor = (Editor*)lpParam;
+    char buffer[4096];
+    DWORD bytesRead;
+
+    const DWORD read_interval_ms = 10;
+
+    while(editor->terminalActive) {
+        if (ReadFile(editor->hChildStdoutRead, buffer, sizeof(buffer), &bytesRead, NULL)) {
+            if (bytesRead > 0) {
+                editor->processTerminalOutput(std::string(buffer, bytesRead));
+            } 
+        } else {
+            DWORD error = GetLastError();
+            if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
+                if (editor->terminalActive) {
+                    editor->stopTerminal();
+                }
+                break;
+            } else {
+                std::cerr << "Terminal ReadFile Error: " << error << std::endl;
+            }
+        }
+        Sleep(read_interval_ms);
+    }
+    return 0;
+}
+
+void Editor::readTerminalOutput() {
+    // The reading is handled by the background thread.
+    // This function can be a no-op or merely exist to fit the refreshScreen dispatch.
+    // The thread calls processTerminalOutput, which will modify the buffer
+    // and ideally trigger a redraw (which refreshScreen handles on next loop).
+}
+
+void Editor::writeTerminalInput(const std::string& input) {
+    if (hChildStdinWrite == NULL) return;
+    DWORD bytesWriten;
+
+    WriteFile(hChildStdinWrite, input.c_str(), input.length(), &bytesWriten, NULL);
+}
+
+void Editor::processTerminalOutput(const std::string& data) {
+    // Basic ANSI parser state machine
+    for (char c : data) {
+        if (!asiEscapeBuffe.empty()) {
+            asiEscapeBuffe += c;
+            if (c >= '@' && c <= '~') { // End of a CSI (Control Sequence Introducer) sequence
+                if (asiEscapeBuffe.length() > 2 && asiEscapeBuffe[1] == '[') {
+                    std::string params_str = asiEscapeBuffe.substr(2, asiEscapeBuffe.length() - 3);
+                    ansiSGRParams.clear();
+
+                    if (params_str.empty()) {
+                        ansiSGRParams.push_back(0);
+                    } else {
+                        std::istringstream iss(params_str);
+                        std::string segment;
+                        while(std::getline(iss, segment, ';')) {
+                            try {
+                                ansiSGRParams.push_back(std::stoi(segment));
+                            } catch (...) { /* Invalid param, ignore */ }
+                        }
+                    }
+
+                    char final_char = asiEscapeBuffe.back();
+                    if (final_char == 'm') {
+                        applyAnsiSGR(ansiSGRParams);
+                    } else if (final_char == 'H' || final_char == 'f') { // CUP or HVP
+                        int row = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
+                        int col = (ansiSGRParams.size() < 2) ? 1 : ansiSGRParams[1];
+                        applyAnsiCUP(row, col);
+                    } else if (final_char == 'J') { // ED (Erase Display)
+                        int param = ansiSGRParams.empty() ? 0 : ansiSGRParams[0];
+                        applyAnsiED(param);
+                    } else if (final_char == 'K') { // EL (Erase Line)
+                        int param = ansiSGRParams.empty() ? 0 : ansiSGRParams[0];
+                        applyAnsiEL(param);
+                    } else if (final_char == 'A') { // CUU - Cursor Up
+                         int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
+                         terminalCursorY = std::max(0, terminalCursorY - num);
+                    } else if (final_char == 'B') { // CUD - Cursor Down
+                         int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
+                         terminalCursorY = std::min(terminalHeight - 1, terminalCursorY + num);
+                    } else if (final_char == 'C') { // CUF - Cursor Forward
+                         int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
+                         terminalCursorX = std::min(terminalWidth - 1, terminalCursorX + num);
+                    } else if (final_char == 'D') { // CUB - Cursor Backward
+                         int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
+                         terminalCursorX = std::max(0, terminalCursorX - num);
+                    }
+                    // Add more if needed (e.g., S/T for scroll, L/M for insert/delete line)
+                }
+                asiEscapeBuffe.clear();
+            }
+        } else if (c == 0x1B) { // ESC
+            asiEscapeBuffe += c;
+        } else if (c == '\r') {
+            terminalCursorX = 0;
+        } else if (c == '\n') {
+            terminalCursorY++;
+            terminalCursorX = 0; // Usually moves to column 0 on newline
+            if (terminalCursorY >= terminalHeight) {
+                // Scroll up the buffer by shifting lines
+                for (int r = 0; r < terminalHeight - 1; ++r) {
+                    terminalBuffer[r] = terminalBuffer[r+1];
+                }
+                // Clear the last line
+                terminalBuffer[terminalHeight-1].assign(terminalWidth, { ' ', currentFgColor, currentBgColor, currentBold });
+                terminalCursorY = terminalHeight - 1; // Stay on the last line
+                // terminalScrollOffset is not used for internal buffer scroll here
+            }
+        } else if (c == '\b') { // Backspace
+            if (terminalCursorX > 0) {
+                terminalCursorX--;
+                // Optionally: clear the character that was backspaced over
+                if (terminalCursorY < terminalHeight && terminalCursorX < terminalWidth) {
+                    terminalBuffer[terminalCursorY][terminalCursorX] = { ' ', currentFgColor, currentBgColor, currentBold };
+                }
+            }
+        } else if (c == '\t') { // Tab
+            terminalCursorX += (KILO_TAB_STOP - (terminalCursorX % KILO_TAB_STOP));
+            if (terminalCursorX >= terminalWidth) terminalCursorX = terminalWidth - 1; // Clamp
+            // Tab character itself is not stored in buffer if expanding
+            // To store tab characters literally in buffer, then expand on drawing (like editor mode)
+            // would require different handling. For now, it moves cursor.
+        } else {
+            // Regular character
+            if (terminalCursorY < terminalHeight && terminalCursorX < terminalWidth) {
+                terminalBuffer[terminalCursorY][terminalCursorX] = { c, currentFgColor, currentBgColor, currentBold };
+            }
+            terminalCursorX++;
+            if (terminalCursorX >= terminalWidth) { // Auto-wrap
+                terminalCursorX = 0;
+                terminalCursorY++;
+                if (terminalCursorY >= terminalHeight) { // Scroll if needed
+                    for (int r = 0; r < terminalHeight - 1; ++r) {
+                        terminalBuffer[r] = terminalBuffer[r+1];
+                    }
+                    terminalBuffer[terminalHeight-1].assign(terminalWidth, { ' ', currentFgColor, currentBgColor, currentBold });
+                    terminalCursorY = terminalHeight - 1;
+                }
+            }
+        }
+    }
+
+    for (auto& s : prevDrawnLines)
+      s.assign(screenCols, ' ');
+    prevStatusMessage = ""; 
+    prevMessageBarMessage = "";
+}
+
+void Editor::resizeTerminal(int width, int height) {
+    terminalWidth = width;
+    terminalHeight = height;
+    terminalBuffer.resize(terminalHeight);
+    for (int r = 0; r < terminalHeight; ++r) {
+        terminalBuffer[r].resize(terminalWidth, { ' ', defaultFgColor, defaultBgColor, false });
+    }
+    // Reset cursor and scroll after resize
+    terminalCursorX = 0;
+    terminalCursorY = 0;
+    terminalScrollOffset = 0; // Not actively used for internal buffer scrolling in this model
+    currentFgColor = defaultFgColor;
+    currentBgColor = defaultBgColor;
+    currentBold = false;
+    ansiSGRParams.clear();
+    asiEscapeBuffe.clear();
+    clearTerminalBuffer(); // Clear content
+    
+    for (auto& s : prevDrawnLines)
+      s.assign(screenCols, ' ');  // Invalidate editor content cache
+    prevStatusMessage = "";       // Invalidate status message cache
+    prevMessageBarMessage = "";   // Invalidate message bar cache
+}
+
+void Editor::drawTerminalScreen() {
+    for (int y = 0; y < terminalHeight; ++y) {
+        setCursorPosition(0, y); // Start drawing at screen (0,y)
+        for (int x = 0; x < terminalWidth; ++x) {
+            TerminalChar tc = terminalBuffer[y][x];
+            WORD attributes = tc.fgColor | tc.bgColor;
+            if (tc.bold) attributes |= FOREGROUND_INTENSITY; // Apply intensity for bold
+
+            // To avoid flashing/flicker from character-by-character writes,
+            // we should group characters with the same attribute.
+            // This is a simple per-char write, which can flicker.
+            setTextColor(attributes);
+            writeStringAt(x, y, std::string(1, tc.c));
+        }
+        resetTextColor();
+    }
+}
+
+void Editor::clearTerminalBuffer() {
+    terminalBuffer.assign(terminalHeight, std::vector<TerminalChar>(terminalWidth, { ' ', defaultFgColor, defaultBgColor, false }));
+}
+
+void Editor::applyAnsiSGR(const std::vector<int>& params) {
+  if (params.empty()) {  // Default: reset all attributes
+    currentFgColor = defaultFgColor;
+    currentBgColor = defaultBgColor;
+    currentBold = false;
+  }
+  for (int param : params) {
+    switch (param) {
+      case 0:  // Reset all attributes
+        currentFgColor = defaultFgColor;
+        currentBgColor = defaultBgColor;
+        currentBold = false;
+        break;
+      case 1:  // Bold/Increased Intensity
+        currentBold = true;
+        break;
+      case 22:  // Not Bold/Normal Intensity
+        currentBold = false;
+        break;
+      case 30:
+        currentFgColor = BLACK;
+        break;
+    case 31:
+        currentFgColor = RED;
+        break;
+    case 32:
+        currentFgColor = GREEN;
+        break;
+    case 33:
+        currentFgColor = YELLOW;
+        break;
+    case 34:
+        currentFgColor = BLUE;
+        break;
+    case 35:
+        currentFgColor = MAGENTA;
+        break;
+      case 36:
+        currentFgColor = CYAN;
+        break;
+      case 37:
+        currentFgColor = WHITE;
+        break;
+      case 39:
+        currentFgColor = defaultFgColor;
+        break;  // Default foreground color
+      case 40:
+        currentBgColor = BLACK;
+        break;
+      case 41:
+        currentBgColor = BG_RED;
+        break;
+      case 42:
+        currentBgColor = BG_GREEN;
+        break;
+      case 43:
+        currentBgColor = BG_YELLOW;
+        break;
+      case 44:
+        currentBgColor = BG_BLUE;
+        break;
+      case 45:
+        currentBgColor = BG_MAGENTA;
+        break;
+      case 46:
+        currentBgColor = BG_CYAN;
+        break;
+      case 47:
+        currentBgColor = BG_WHITE;
+        break;
+      case 49:
+        currentBgColor = defaultBgColor;
+        break;  // Default background color
+      default:
+        break;
+    }
+  }
+}
+
+void Editor::applyAnsiCUP(int row, int col) {
+  // ANSI rows/cols are 1-based. Convert to 0-based.
+  terminalCursorY = std::max(0, row - 1);
+  terminalCursorX = std::max(0, col - 1);
+
+  // Clamp to screen bounds
+  if (terminalCursorY >= terminalHeight)
+    terminalCursorY = terminalHeight - 1;
+  if (terminalCursorX >= terminalWidth)
+    terminalCursorX = terminalWidth - 1;
+}
+
+void Editor::applyAnsiED(int param) {
+  if (param == 0) {  // Erase from cursor to end of screen
+    // Clear current line from cursor
+    for (int x = terminalCursorX; x < terminalWidth; ++x) {
+      terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
+                                            currentBold};
+    }
+    // Clear subsequent lines
+    for (int y = terminalCursorY + 1; y < terminalHeight; ++y) {
+      terminalBuffer[y].assign(
+          terminalWidth, {' ', currentFgColor, currentBgColor, currentBold});
+    }
+  } else if (param == 1) {  // Erase from cursor to beginning of screen
+    // Clear current line from beginning to cursor
+    for (int x = 0; x <= terminalCursorX; ++x) {
+      terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
+                                            currentBold};
+    }
+    // Clear preceding lines
+    for (int y = 0; y < terminalCursorY; ++y) {
+      terminalBuffer[y].assign(
+          terminalWidth, {' ', currentFgColor, currentBgColor, currentBold});
+    }
+  } else if (param == 2) {  // Erase entire screen
+    clearTerminalBuffer();
+  }
+}
+
+void Editor::applyAnsiEL(int param) {
+  if (param == 0) {  // Erase from cursor to end of line
+    for (int x = terminalCursorX; x < terminalWidth; ++x) {
+      terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
+                                            currentBold};
+    }
+  } else if (param == 1) {  // Erase from cursor to beginning of line
+    for (int x = 0; x <= terminalCursorX; ++x) {
+      terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
+                                            currentBold};
+    }
+  } else if (param == 2) {  // Erase entire line
+    terminalBuffer[terminalCursorY].assign(
+        terminalWidth, {' ', currentFgColor, currentBgColor, currentBold});
+  }
+}
+
 void Editor::refreshScreen() {
     updateScreenSize();
 
@@ -1136,6 +1637,9 @@ void Editor::refreshScreen() {
         drawScreenContent();
     } else if (mode == FILE_EXPLORER_MODE) {
         drawFileExplorer();
+    } else if (mode == TERMINAL_MODE) {
+        readTerminalOutput();
+        drawTerminalScreen();
     }
 
     drawStatusBar();
@@ -1148,8 +1652,10 @@ void Editor::refreshScreen() {
     } else if (mode == PROMPT_MODE) {
         // Place cursor at the end of the prompt in the message bar
         setCursorPosition(promptMessage.length() + searchQuery.length(), screenRows - 1);
+    } else if (mode == TERMINAL_MODE) {
+        setCursorPosition(terminalCursorX, terminalCursorY);
     }
     else { 
-        setCursorPosition(0, (selectedFileIndex - fileExporerScrollOffset) + (screenRows - 2));
+        setCursorPosition(0, (selectedFileIndex - fileExplorerScrollOffset) + (screenRows - 2));
     }
 }

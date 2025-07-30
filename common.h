@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <algorithm>
 #include <functional>
+#include <thread>
+#include <mutex>
 
 extern "C" {
 #include "lua_src/lua.h"  

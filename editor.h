@@ -6,11 +6,13 @@
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <map>
 
 enum EditorMode {
 	EDIT_MODE,
 	FILE_EXPLORER_MODE,
 	PROMPT_MODE,
+	TERMINAL_MODE
 };
 
 struct DirEntry {
@@ -26,6 +28,14 @@ enum EditorCommand {
 };
 
 const int KILO_TAB_STOP = 8;
+
+struct TerminalChar {
+	char c;
+
+	int fgColor;
+	int bgColor;
+	bool bold;
+};
 
 struct Editor {
 	std::vector<std::string> lines;
@@ -51,7 +61,7 @@ struct Editor {
 	std::string currentDirPath;
 	std::vector<DirEntry> directoryEntries;
 	int selectedFileIndex;
-	int fileExporerScrollOffset;
+	int fileExplorerScrollOffset;
 
 	std::string searchQuery;
 	std::vector<std::pair<int, int>> searchResults;
@@ -59,6 +69,29 @@ struct Editor {
 	int originalCursorX, originalCursorY;
 	int originalRowOffset, originalColOffset;
 	std::string promptMessage;
+
+	bool terminalActive;
+	std::vector<std::vector<TerminalChar>> terminalBuffer;
+	int terminalCursorX;
+	int terminalCursorY;
+	int terminalScrollOffset;
+	int terminalHeight;
+	int terminalWidth;
+
+	HANDLE hChildStdinRead;
+	HANDLE hChildStdinWrite;
+	HANDLE hChildStdoutRead;
+	HANDLE hChildStdoutWrite;
+	PROCESS_INFORMATION piProcInfo;
+
+	std::string asiEscapeBuffe;
+	std::vector<int> ansiSGRParams;
+	int currentFgColor;
+	int currentBgColor;
+	bool currentBold;
+
+	int defaultFgColor;
+	int defaultBgColor;
 
 	Editor();
 	~Editor();
@@ -91,6 +124,20 @@ struct Editor {
 	void loadLuaPlugins(const std::string& pluginDir = "plugins");
 	bool executeLuaPluginCommand(const std::string& pluginName, const std::string& commandName);
 	void exposeEditorToLua();
+
+	void toggleTerminal();
+	void startTerminal();
+	void stopTerminal();
+	void readTerminalOutput();
+	void writeTerminalInput(const std::string& input);
+	void processTerminalOutput(const std::string& data);
+	void resizeTerminal(int width, int height);
+	void drawTerminalScreen();
+	void clearTerminalBuffer();
+	void applyAnsiSGR(const std::vector<int>& params);
+	void applyAnsiCUP(int row, int col);
+	void applyAnsiED(int param);
+	void applyAnsiEL(int param);
 
 private:
 	void calculateLineNumberWidth();

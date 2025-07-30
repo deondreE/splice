@@ -32,8 +32,8 @@ workspace "TextEditor"
         }
 
         removefiles {
-          "lua_src/lua.c",
-          "lua_src/luac.c"
+            "lua_src/lua.c",
+            "lua_src/luac.c"
         }
 
         includedirs {
@@ -49,9 +49,6 @@ workspace "TextEditor"
             "-std=c++17",
             "-static-libgcc",
             "-static-libstdc++",
-            -- Suppress some warnings from Lua's C code if necessary
-            -- "-Wno-unused-variable",
-            -- "-Wno-incompatible-pointer-types",
         }
 
         filter "system:windows"
