@@ -771,8 +771,6 @@ static const luaL_Reg editor_lib[] = {
 };
 #pragma endregion
 
-
-
 Editor::Editor() : 
     cursorX(0), 
     cursorY(0), 
@@ -1083,98 +1081,133 @@ void Editor::updateScreenSize() {
     }
 }
 
+void Editor::setCursorVisibility(bool visible) {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_CURSOR_INFO cursorInfo;
+    if (!GetConsoleCursorInfo(hConsole, &cursorInfo)) {
+        return;
+    }
+    cursorInfo.bVisible = visible;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+}
+
 void Editor::drawScreenContent() {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) {
+        std::cerr << "Error: Invalid console handle in drawScreenContent." << std::endl;
+        return;
+    }
+
+    // This is the effective drawing width for text content after line numbers
     int effectiveScreenCols = screenCols - lineNumberWidth;
 
-    for (int i = 0; i < screenRows - 2; ++i) {
-        setCursorPosition(0, i);
-
+    for (int i = 0; i < screenRows - 2; ++i) { // Iterate through each visible screen row for content
         int fileRow = rowOffset + i;
-        std::string lineToDraw;
+        std::string fullLineContentToDraw = ""; // The full string content of the screen line (chars)
+        std::vector<WORD> fullLineAttributes(screenCols); // Attributes for each char on the screen line
 
+        // --- 1. Prepare Line Number Part ---
+        std::string lineNumberStr;
         std::ostringstream ss_lineNumber;
-        if (fileRow < lines.size()) {
+        if (fileRow >= 0 && fileRow < lines.size()) { // Check bounds for actual lines
             ss_lineNumber << std::setw(lineNumberWidth - 1) << (fileRow + 1) << " ";
         } else {
+            // For lines beyond file content (like ~ in Vim)
             ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~";
         }
-        lineToDraw += ss_lineNumber.str();
+        lineNumberStr = ss_lineNumber.str();
+        fullLineContentToDraw += lineNumberStr;
 
+        // Set attributes for the line number part
+        for (int k = 0; k < lineNumberStr.length(); ++k) {
+            fullLineAttributes[k] = defaultFgColor | defaultBgColor; // Default text color for line numbers
+        }
+
+
+        // --- 2. Prepare Rendered Text Content Part ---
         std::string renderedTextContent = "";
-        if (fileRow < lines.size()) {
+        if (fileRow >= 0 && fileRow < lines.size()) {
             std::string fullRenderedLine = getRenderedLine(fileRow);
 
             int startCharInRenderedLine = colOffset;
             int endCharInRenderedLine = colOffset + effectiveScreenCols;
 
-            if (startCharInRenderedLine < 0) startCharInRenderedLine = 0;
-            if (startCharInRenderedLine > (int)fullRenderedLine.length()) startCharInRenderedLine = (int)fullRenderedLine.length();
-
-            if (endCharInRenderedLine > (int)fullRenderedLine.length()) endCharInRenderedLine = (int)fullRenderedLine.length();
-            if (endCharInRenderedLine < 0) endCharInRenderedLine = 0;
+            // Clamp the substring indices to valid range
+            startCharInRenderedLine = std::max(0, startCharInRenderedLine);
+            startCharInRenderedLine = std::min(startCharInRenderedLine, (int)fullRenderedLine.length());
+            endCharInRenderedLine = std::max(0, endCharInRenderedLine);
+            endCharInRenderedLine = std::min(endCharInRenderedLine, (int)fullRenderedLine.length());
 
             if (endCharInRenderedLine > startCharInRenderedLine) {
                 renderedTextContent = fullRenderedLine.substr(startCharInRenderedLine, endCharInRenderedLine - startCharInRenderedLine);
             }
         }
+        fullLineContentToDraw += renderedTextContent;
 
-        bool lineHasHighlight = false;
-        if (!searchQuery.empty() && currentMatchIndex != -1) {
-            // Check if any match is on this fileRow
-            for (const auto& match : searchResults) {
-                if (match.first == fileRow) {
-                    lineHasHighlight = true;
-                    break;
+        // Set attributes for the main text content, including search highlighting
+        int currentScreenCol = lineNumberStr.length(); // Start after line numbers
+        for (int k = 0; k < renderedTextContent.length(); ++k) {
+            WORD current_attributes = defaultFgColor | defaultBgColor; // Base text color
+            bool isHighlight = false;
+
+            // Check if current character is part of the highlighted search result
+            if (!searchQuery.empty() && currentMatchIndex != -1 && fileRow == searchResults[currentMatchIndex].first) {
+                // Convert search result's character index (in logical line) to its rendered/visual index
+                int matchLogicalStart = searchResults[currentMatchIndex].second;
+                int matchLogicalEnd = searchResults[currentMatchIndex].second + searchQuery.length();
+
+                // Get rendered positions of match in the *full* rendered line (not just visible part)
+                int matchRenderedStart = cxToRx(fileRow, matchLogicalStart);
+                int matchRenderedEnd = cxToRx(fileRow, matchLogicalEnd);
+
+                // Calculate the character's *global rendered position* on the line being drawn
+                // This is (currentScreenCol - lineNumberStr.length()) + colOffset (where colOffset is the scroll)
+                int charGlobalRenderedPos = (currentScreenCol + k) - lineNumberStr.length() + colOffset;
+
+                // If this character's global rendered position falls within the highlighted match's rendered range
+                if (charGlobalRenderedPos >= matchRenderedStart && charGlobalRenderedPos < matchRenderedEnd) {
+                    isHighlight = true;
                 }
             }
+
+            if (isHighlight) {
+                current_attributes = BG_YELLOW | BLACK; // Highlight: Black text on Yellow background
+            }
+            fullLineAttributes[currentScreenCol + k] = current_attributes;
         }
-        
-        std::string fullLineContentForDiff = lineToDraw + renderedTextContent + std::string(screenCols - (lineToDraw.length() + renderedTextContent.length()), ' ');
 
-        if (lineHasHighlight || i >= prevDrawnLines.size() || prevDrawnLines[i] != fullLineContentForDiff) {
-            setCursorPosition(0, i);
-            resetTextColor(); // Default color for text area
+        // --- 3. Pad the rest of the line with spaces and default attributes ---
+        for (int k = fullLineContentToDraw.length(); k < screenCols; ++k) {
+            fullLineContentToDraw += ' ';
+            fullLineAttributes[k] = defaultFgColor | defaultBgColor;
+        }
 
-            // Draw line number part first
-            writeStringAt(0, i, lineToDraw.substr(0, lineNumberWidth));
 
-            // Now iterate through the visible part of the rendered text content for highlighting
-            int currentRenderedCol = lineNumberWidth;
-            for (int k = 0; k < renderedTextContent.length(); ++k) {
-                char ch = renderedTextContent[k];
-                bool isHighlight = false;
-                
-                // Check if current char is part of the highlighted search result
-                if (!searchQuery.empty() && currentMatchIndex != -1 && fileRow == searchResults[currentMatchIndex].first) {
-                    // Convert search result char index to rendered index to compare
-                    int matchRenderedStart = cxToRx(fileRow, searchResults[currentMatchIndex].second);
-                    int matchRenderedEnd = cxToRx(fileRow, searchResults[currentMatchIndex].second + searchQuery.length());
+        // --- 4. Perform Diff and Draw Only if Necessary ---
+        // Compare the *full* line string (including padding) with the previously drawn line
+        // We ensure prevDrawnLines is appropriately sized by updateScreenSize()
+        if (i >= prevDrawnLines.size() || prevDrawnLines[i] != fullLineContentToDraw) {
+            COORD writePos = { 0, (SHORT)i }; // Position to start writing on the console buffer
+            DWORD charsWritten;
 
-                    // Relative to visible screen (colOffset)
-                    if (currentRenderedCol - lineNumberWidth + colOffset >= matchRenderedStart &&
-                        currentRenderedCol - lineNumberWidth + colOffset < matchRenderedEnd) {
-                        isHighlight = true;
-                    }
-                }
-
-                if (isHighlight) {
-                    setTextColor(BG_YELLOW | BLACK); // Highlight: Black on Yellow
-                } else {
-                    resetTextColor(); // Default color
-                }
-                writeStringAt(currentRenderedCol, i, std::string(1, ch)); // Write one character
-                currentRenderedCol++;
+            // Write characters to the console
+            if (!WriteConsoleOutputCharacterA(hConsole, fullLineContentToDraw.c_str(), screenCols, writePos, &charsWritten)) {
+                std::cerr << "WriteConsoleOutputCharacterA failed: " << GetLastError() << std::endl;
             }
-            resetTextColor(); // Reset after text
-            
-            // Clear rest of the line to ensure old highlights are gone
-            writeStringAt(currentRenderedCol, i, std::string(screenCols - currentRenderedCol, ' '));
-            
+
+            // Write attributes to the console
+            if (!WriteConsoleOutputAttribute(hConsole, fullLineAttributes.data(), screenCols, writePos, &charsWritten)) {
+                std::cerr << "WriteConsoleOutputAttribute failed: " << GetLastError() << std::endl;
+            }
+
+            // Update the cached line for the next diff cycle
             if (i < prevDrawnLines.size()) {
-                prevDrawnLines[i] = fullLineContentForDiff; // Update prevDrawnLines with the full rendered line (no colors)
+                prevDrawnLines[i] = fullLineContentToDraw;
             }
         }
     }
+
+    // Status and message bars are drawn separately (and more simply, so they can use direct calls)
     drawStatusBar();
     drawMessageBar();
 }
@@ -1354,27 +1387,25 @@ std::string Editor::trimRight(const std::string& s) {
 }
 
 void Editor::scroll() {
-    // ... vertical scrolling (unchanged) ...
     if (cursorY < rowOffset) {
         rowOffset = cursorY;
-        for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
+        force_full_redraw_internal();
     }
     if (cursorY >= rowOffset + screenRows - 2) {
         rowOffset = cursorY - (screenRows - 2) + 1;
-        for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
+        force_full_redraw_internal();
     }
 
-    // --- MODIFIED: Horizontal scrolling to use rendered columns ---
     int renderedCursorX = cxToRx(cursorY, cursorX); // Get visual position of cursor
-    int renderedLineLength = getRenderedLine(cursorY).length(); // Get visual length of current line
+    int effectiveColsForText = screenCols - lineNumberWidth;
 
     if (renderedCursorX < colOffset) {
         colOffset = renderedCursorX;
-        for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
+        force_full_redraw_internal();
     }
-    if (renderedCursorX >= colOffset + (screenCols - lineNumberWidth)) {
-        colOffset = renderedCursorX - (screenCols - lineNumberWidth) + 1;
-        for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
+    if (renderedCursorX >= colOffset + effectiveColsForText) {
+        colOffset = renderedCursorX - effectiveColsForText + 1;
+        force_full_redraw_internal();
     }
 }
 
@@ -2329,10 +2360,12 @@ void Editor::applyAnsiEL(int param) {
 }
 
 void Editor::refreshScreen() {
+    setCursorVisibility(false);
+
     updateScreenSize();
 
-    if (mode == EDIT_MODE || mode == PROMPT_MODE) { // PROMPT_MODE also uses the editor display
-        scroll();
+    if (mode == EDIT_MODE || mode == PROMPT_MODE) {
+        scroll();   
         drawScreenContent();
     } else if (mode == FILE_EXPLORER_MODE) {
         drawFileExplorer();
@@ -2344,19 +2377,37 @@ void Editor::refreshScreen() {
     drawStatusBar();
     drawMessageBar();
 
+
+    int finalCursorX = 0;
+    int finalCursorY = 0;
     if (mode == EDIT_MODE) {
-        int finalRenderedCursorX = lineNumberWidth + (cxToRx(cursorY, cursorX) - colOffset);
-        int finalRenderedCursorY = cursorY - rowOffset;
-        setCursorPosition(finalRenderedCursorX, finalRenderedCursorY);
+        int renderedCursorInLine = cxToRx(cursorY, cursorX);
+        int cursorXRelativeToTextArea = renderedCursorInLine - colOffset;
+        finalCursorX = lineNumberWidth + cursorXRelativeToTextArea;
+        finalCursorY = cursorY - rowOffset;
+        finalCursorX = std::max(0, std::min(finalCursorX, screenCols - 1));
+        finalCursorY = std::max(0, std::min(finalCursorY, screenRows - 3));
     } else if (mode == PROMPT_MODE) {
-        // Place cursor at the end of the prompt in the message bar
-        setCursorPosition(promptMessage.length() + searchQuery.length(), screenRows - 1);
+        finalCursorX = promptMessage.length() + searchQuery.length();
+        finalCursorY = screenRows - 1; // Last row for prompt
+        finalCursorX = std::min(finalCursorX, screenCols - 1);
     } else if (mode == TERMINAL_MODE) {
-        setCursorPosition(terminalCursorX, terminalCursorY);
+        finalCursorX = terminalCursorX;
+        finalCursorY = terminalCursorY;
+        finalCursorX = std::max(0, std::min(finalCursorX, screenCols - 1));
+        finalCursorY = std::max(0, std::min(finalCursorY, screenRows - 3));
     }
     else { 
-        setCursorPosition(0, (selectedFileIndex - fileExplorerScrollOffset) + (screenRows - 2));
+        int explorer_content_start_row = 2; // PATH line (row 0) + 1 blank line (row 1) = content starts at row 2
+        finalCursorX = 0; // Always column 0 for selected item's visual cue
+        finalCursorY = explorer_content_start_row + (selectedFileIndex - fileExplorerScrollOffset);
+
+        finalCursorY = std::max(explorer_content_start_row, std::min(finalCursorY, screenRows - 3));
+        finalCursorX = std::min(finalCursorX, screenCols - 1); // Clamp X (always 0, should be fine)
     }
+
+    setCursorPosition(finalCursorX, finalCursorY);
+    setCursorVisibility(true);
 }
 
 void Editor::clearScreen() {
@@ -2412,8 +2463,4 @@ void Editor::force_full_redraw_internal() {
     // Invalidate cached status and message bar content
     prevStatusMessage = "";
     prevMessageBarMessage = "";
-
-    // Clear the *entire console* to remove any lingering artifacts or old content.
-    // This is especially important when switching modes (editor to explorer/terminal).
-    clearScreen();
 }

@@ -145,6 +145,7 @@ public:
     std::string promptResult;
     void force_full_redraw_internal();
     void clearScreen();
+	void setCursorVisibility(bool visible);
 
 	void toggleTerminal();
 	void startTerminal();
