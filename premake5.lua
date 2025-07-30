@@ -14,17 +14,14 @@ workspace "TextEditor"
     project "Editor"
         kind "ConsoleApp"
         language "C++"
+        cppdialect "C++20"
         targetdir "bin/%{cfg.buildcfg}"
         objdir "bin-int/%{cfg.buildcfg}"
         location "."
 
         files {
-            "main.cpp",
-            "editor.cpp",
-            "win_console_utils.cpp",
-            "common.h",
-            "editor.h",
-            "win_console_utils.h",
+            "src/**.cpp",
+            "src/**.h",
 
             "lua_src/**.c", 
             -- Add Lua header files for dependency tracking (still good practice)
@@ -38,6 +35,7 @@ workspace "TextEditor"
 
         includedirs {
             ".",
+            "src",
             "lua_src"
         }
 
@@ -45,13 +43,11 @@ workspace "TextEditor"
             "Shlwapi",
         }
 
-        buildoptions {
-            "-std=c++17",
-            "-static-libgcc",
-            "-static-libstdc++",
-        }
-
         filter "system:windows"
             toolset "msc"
+            buildoptions {}
+            flags { "MultiProcessorCompile" }
+            -- fatalwarnings { "All" }
+            defines {"_CRT_SECURE_NO_WARNINGS"}
 
         filter {}
