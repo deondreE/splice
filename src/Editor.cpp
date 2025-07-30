@@ -1344,6 +1344,9 @@ bool Editor::promptUser(const std::string& prompt, int input_c, std::string& res
 }
 
 void Editor::drawStatusBar() {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) return;
+
     std::string currentStatus;
     std::string filename_display = filename.empty() ? "[No Name]" : filename;
     currentStatus += filename_display;
@@ -1354,11 +1357,24 @@ void Editor::drawStatusBar() {
 
     currentStatus += spaces + cursor_info;
 
-    // --- Only redraw if status bar content has changed ---
+    if (currentStatus.length() < screenCols) {
+        currentStatus += std::string(screenCols - currentStatus.length(), ' ');
+    } else if (currentStatus.length() > screenCols) {
+        currentStatus = currentStatus.substr(0, screenCols);
+    }
+
     if (currentStatus != prevStatusMessage) {
-        setCursorPosition(0, screenRows - 2); // Second to last row
-        setTextColor(BG_BLUE | WHITE);
-        writeStringAt(0, screenRows - 2, currentStatus);
+        std::vector<WORD> attributes(screenCols);
+        for (int k = 0; k < screenCols; ++k) {
+            attributes[k] = BG_BLUE | WHITE;
+        }
+
+        COORD writePos = {0, (SHORT)(screenRows - 2)};
+        DWORD charsWritten;
+
+        WriteConsoleOutputCharacterA(hConsole, currentStatus.c_str(), screenCols, writePos, &charsWritten);
+        WriteConsoleOutputAttribute(hConsole, attributes.data(), screenCols, writePos, &charsWritten);
+
         prevStatusMessage = currentStatus;
     }
 }
@@ -1758,6 +1774,7 @@ void Editor::moveFileExplorerSelection(int key) {
     if (directoryEntries.empty()) return;
 
     int oldSelectedFileIndex = selectedFileIndex;
+    int oldFileExplorerScrollOffset = fileExplorerScrollOffset; // Capture old scroll for potential diffing
 
     if (key == ARROW_UP) {
         selectedFileIndex = std::max(0, selectedFileIndex - 1);
@@ -1766,7 +1783,7 @@ void Editor::moveFileExplorerSelection(int key) {
         selectedFileIndex = std::min((int)directoryEntries.size() - 1, selectedFileIndex + 1);
     }
     else if (key == PAGE_UP) {
-        selectedFileIndex = std::max(0, selectedFileIndex - (screenRows - 4)); // -4 for bars and top/bottom padding
+        selectedFileIndex = std::max(0, selectedFileIndex - (screenRows - 4));
     }
     else if (key == PAGE_DOWN) {
         selectedFileIndex = std::min((int)directoryEntries.size() - 1, selectedFileIndex + (screenRows - 4));
@@ -1786,8 +1803,8 @@ void Editor::moveFileExplorerSelection(int key) {
         fileExplorerScrollOffset = selectedFileIndex - (screenRows - 4) + 1;
     }
 
-    if (oldSelectedFileIndex != selectedFileIndex) {
-        clearScreen();
+    if (oldSelectedFileIndex != selectedFileIndex || oldFileExplorerScrollOffset != fileExplorerScrollOffset) {
+        force_full_redraw_internal(); // This now just invalidates the cache, doesn't clear screen
     }
 }
 
@@ -1821,78 +1838,102 @@ void Editor::handleFileExplorerEnter() {
 }
 
 void Editor::drawFileExplorer() {
-    clearScreen(); // Full clear to avoid artifacts when switching from editor
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) return;
 
-    int startRow = 0; // Starting screen row for explorer list
+    int startRowForHeader = 0;
+    int startRowForContent = startRowForHeader + 2;
+    int visibleRowsForContent = screenRows - startRowForContent - 2;
 
-    // Display current path
-    setCursorPosition(0, startRow);
-    setTextColor(CYAN | INTENSITY);
-    writeStringAt(0, startRow, "PATH: " + currentDirPath);
-    resetTextColor();
+    std::string pathLine = "PATH: " + currentDirPath;
+    if (pathLine.length() < screenCols) {
+        pathLine += std::string(screenCols - pathLine.length(), ' ');
+    } else if (pathLine.length() > screenCols) {
+        pathLine = pathLine.substr(0, screenCols);
+    }
 
-    startRow += 2; // Leave a line for separation
+    std::vector<WORD> pathAttrs(screenCols);
+    for(int k=0; k<screenCols; ++k) pathAttrs[k] = CYAN | INTENSITY | defaultBgColor;
 
-    int visibleRows = screenRows - startRow - 2; // Remaining rows for list, excluding status/message bars
+    COORD pathWritePos = {0, (SHORT)startRowForHeader};
+    DWORD charsWritten;
+    WriteConsoleOutputCharacterA(hConsole, pathLine.c_str(), screenCols, pathWritePos, &charsWritten);
+    WriteConsoleOutputAttribute(hConsole, pathAttrs.data(), screenCols, pathWritePos, &charsWritten);
 
-    for (int i = 0; i < visibleRows; ++i) {
-        setCursorPosition(0, startRow + i);
+    std::string blankLine(screenCols, ' ');
+    std::vector<WORD> blankAttrs(screenCols, defaultFgColor | defaultBgColor);
+    COORD blankLinePos = {0, (SHORT)(startRowForHeader + 1)};
+    WriteConsoleOutputCharacterA(hConsole, blankLine.c_str(), screenCols, blankLinePos, &charsWritten);
+    WriteConsoleOutputAttribute(hConsole, blankAttrs.data(), screenCols, blankLinePos, &charsWritten);
+
+    for (int i = 0; i < visibleRowsForContent; ++i) {
         int entryIndex = fileExplorerScrollOffset + i;
+        int currentScreenRow = startRowForContent + i;
 
-        if (entryIndex < directoryEntries.size()) {
+        std::string lineContentToDraw = "";
+        std::vector<WORD> lineAttributes(screenCols);
+
+        if (entryIndex >= 0 && entryIndex < directoryEntries.size()) {
             const DirEntry& entry = directoryEntries[entryIndex];
-            std::string lineToDraw;
 
-            // Highlight selected item
-            if (entryIndex == selectedFileIndex) {  
-                setTextColor(BG_BLUE | WHITE | INTENSITY);
-                lineToDraw += "> ";
-            }
-            else {
-                setTextColor(WHITE);
-                lineToDraw += "  ";
-            }
-
-            // Indicate directory or file
-            if (entry.isDirectory) {
-                setTextColor(BLUE | INTENSITY);
-                lineToDraw += "[" + entry.name + "]";
-            }
-            else {
-                setTextColor(WHITE);
-                lineToDraw += " " + entry.name;
-            }
-
-            std::string formattedEntryText;
-            if (entry.isDirectory) {
-                formattedEntryText = "[" + entry.name + "]";
-            }
-            else {
-                formattedEntryText = " " + entry.name;
-            }
-
-            std::string lineForDraw = (entryIndex == selectedFileIndex ? "> " : "  ") + formattedEntryText;
-            lineForDraw += std::string(screenCols - lineForDraw.length(), ' '); // Pad to full width
-
-            // Re-apply colors for the entire line to ensure consistent background
+            std::string prefix = (entryIndex == selectedFileIndex) ? "> " : "  ";
+            lineContentToDraw += prefix;
+            WORD prefixBg = defaultBgColor;
+            WORD prefixFg = defaultFgColor;
             if (entryIndex == selectedFileIndex) {
-                setTextColor(BG_BLUE | WHITE | INTENSITY);
+                prefixBg = BG_BLUE;
+                prefixFg = WHITE | INTENSITY;
             }
-            else if (entry.isDirectory) {
-                setTextColor(BLUE | INTENSITY); // Directories, non-selected
+            for(int k=0; k<prefix.length(); ++k) lineAttributes[k] = prefixFg | prefixBg;
+
+
+            std::string formattedEntryName;
+            if (entry.isDirectory) {
+                formattedEntryName = "[" + entry.name + "]";
+            } else {
+                formattedEntryName = " " + entry.name;
             }
-            else {
-                setTextColor(WHITE); // Files, non-selected
+            lineContentToDraw += formattedEntryName;
+
+            WORD entryBg = defaultBgColor;
+            WORD entryFg = defaultFgColor;
+            if (entryIndex == selectedFileIndex) {
+                entryBg = BG_BLUE;
+                entryFg = WHITE | INTENSITY;
+            } else if (entry.isDirectory) {
+                entryFg = BLUE | INTENSITY;
+            } else {
+                entryFg = WHITE;
+            }
+            for(int k=0; k<formattedEntryName.length(); ++k) {
+                lineAttributes[prefix.length() + k] = entryFg | entryBg;
             }
 
-            writeStringAt(0, startRow + i, lineForDraw);
-            resetTextColor(); // Reset for next line/outside this loop
+        } else {
+            lineContentToDraw = "";
+            for(int k=0; k<screenCols; ++k) lineAttributes[k] = defaultFgColor | defaultBgColor;
         }
-        else {
-            // Draw empty lines beyond content with default colors
-            setCursorPosition(0, startRow + i);
-            writeStringAt(0, startRow + i, std::string(screenCols, ' '));
+
+        for (int k = lineContentToDraw.length(); k < screenCols; ++k) {
+            lineContentToDraw += ' ';
+            if (k >= lineAttributes.size()) {
+                lineAttributes.push_back(defaultFgColor | defaultBgColor);
+            } else {
+                lineAttributes[k] = defaultFgColor | defaultBgColor;
+            }
         }
+        
+        COORD writePos = {0, (SHORT)currentScreenRow};
+        WriteConsoleOutputCharacterA(hConsole, lineContentToDraw.c_str(), screenCols, writePos, &charsWritten);
+        WriteConsoleOutputAttribute(hConsole, lineAttributes.data(), screenCols, writePos, &charsWritten);
+    }
+
+    for (int i = startRowForContent + visibleRowsForContent; i < screenRows - 2; ++i) {
+        std::string emptyLine(screenCols, ' ');
+        std::vector<WORD> emptyAttrs(screenCols, defaultFgColor | defaultBgColor);
+        COORD writePos = {0, (SHORT)i};
+        WriteConsoleOutputCharacterA(hConsole, emptyLine.c_str(), screenCols, writePos, &charsWritten);
+        WriteConsoleOutputAttribute(hConsole, emptyAttrs.data(), screenCols, writePos, &charsWritten);
     }
 }
 
