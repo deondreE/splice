@@ -24,7 +24,6 @@ workspace "TextEditor"
             "src/**.h",
 
             "lua_src/**.c", 
-            -- Add Lua header files for dependency tracking (still good practice)
             "lua_src/**.h"
         }
 
@@ -36,6 +35,7 @@ workspace "TextEditor"
         includedirs {
             ".",
             "src",
+            "vendor/json/include",
             "lua_src"
         }
 

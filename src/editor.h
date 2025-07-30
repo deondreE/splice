@@ -7,6 +7,8 @@
 #include <string>
 #include <filesystem>
 #include <map>
+#include <functional>
+#include <nlohmann/json.hpp>
 
 enum EditorMode {
 	EDIT_MODE,
@@ -14,6 +16,52 @@ enum EditorMode {
 	PROMPT_MODE,
 	TERMINAL_MODE
 };
+
+struct KeyCombination {
+    int keyCode;
+    bool ctrl;
+    bool alt;
+    bool shift;
+
+    bool operator<(const KeyCombination& other) const {
+        if (keyCode != other.keyCode) return keyCode < other.keyCode;
+        if (ctrl != other.ctrl) return ctrl < other.ctrl;
+        if (alt != other.alt) return alt < other.alt;
+        return shift < other.shift;
+    }
+
+	std::string toString() const {
+		std::string s = "";
+		if (ctrl) s += "Crtl+";
+		if (alt) s += "Alt+";
+		if (shift) s += "Shift+";
+		if (keyCode >= 32 && keyCode <= 126) {
+			s += static_cast<char>(keyCode);
+		}
+		else {
+			switch (keyCode) {
+			case VK_UP: s += "Up"; break;
+			case VK_DOWN: s += "Down"; break;
+			case VK_LEFT: s += "Left"; break;
+			case VK_RIGHT: s += "Right"; break;
+			case VK_PRIOR: s += "PageUp"; break; // VK_PRIOR is Page Up
+			case VK_NEXT: s += "PageDown"; break; // VK_NEXT is Page Down
+			case VK_HOME: s += "Home"; break;
+			case VK_END: s += "End"; break;
+			case VK_DELETE: s += "Delete"; break; // VK_DELETE is Delete key
+			case VK_BACK: s += "Backspace"; break; // VK_BACK is Backspace
+			case VK_RETURN: s += "Enter"; break; // VK_RETURN is Enter
+			case VK_ESCAPE: s += "Esc"; break;
+			case VK_TAB: s += "Tab"; break;
+			case VK_F1: s += "F1"; break; // ... F1-F12
+			case VK_F2: s += "F2"; break;
+				// ... add more VK_ codes as needed
+			default: s += "KEY_" + std::to_string(keyCode); break;
+			}
+		}
+		return s;
+	}
+}; 
 
 struct lua_State;
 
@@ -67,6 +115,15 @@ public:
         LE_UNKNOWN // Mixed or not yet detected
     };
     LineEnding currentLineEnding = LE_CRLF;
+
+	// Keyboard events / Custom binds
+	std::map<KeyCombination, std::string> customKeybindings;
+	std::map < std::string, std::function<void()>> commandRegistry;
+
+	void registerEditorCommand(const std::string& name, std::function<void()> func);
+	bool loadKeybindings(const std::string& filePath = "keybindings.json");
+	void setupDefaultKeybindings(); // Hardcoded defaults
+	void executeCommand(const std::string& commandName);
 
 	lua_State* L;
 
@@ -188,6 +245,10 @@ public:
 
     int kiloTabStop = KILO_TAB_STOP;
     void show_error(const std::string& message, ULONGLONG duration_ms = 8000);
+	void show_message(const std::string& message, ULONGLONG duration_ms = 8000);
+	void processInput(int raw_key_code, char ascii_char, DWORD control_key_state);
+
+    bool should_exit = false;
 
 private:
 	void drawScreenContent();

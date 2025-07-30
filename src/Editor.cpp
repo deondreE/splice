@@ -297,7 +297,9 @@ int lua_get_char_at(lua_State* L) {
 }
 
 int lua_get_tab_stop_width(lua_State* L) {
-    lua_pushinteger(L, KILO_TAB_STOP);
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->kiloTabStop);
     return 1;
 }
 
@@ -882,7 +884,8 @@ Editor::Editor() :
 {
     lines.push_back("");
     updateScreenSize();
-    
+    prevDrawnLines.resize(screenRows - 2);
+
     currentFont = getCurrentConsoleFont();
 
     hConsoleInput = GetStdHandle(STD_INPUT_HANDLE);
@@ -890,20 +893,15 @@ Editor::Editor() :
         if (!GetConsoleMode(hConsoleInput, &originalConsoleMode)) {
             std::cerr << "Error getting console mode: " << GetLastError() << std::endl;
         }
-        // Set the desired raw input mode for the editor
         DWORD newMode = originalConsoleMode;
-        newMode &= ~ENABLE_ECHO_INPUT;      // Disable echoing input
-        newMode &= ~ENABLE_LINE_INPUT;      // Disable line buffering (return on any key)
-        newMode &= ~ENABLE_PROCESSED_INPUT; // Disable Ctrl+C, Ctrl+Break system processing
-        // newMode |= ENABLE_VIRTUAL_TERMINAL_INPUT; // Enable if you want to explicitly parse VT100 input sequences
-                                                    // (like arrow keys as ESC[A, ESC[B etc. directly in your input loop)
-                                                    // Your current approach with ReadConsoleInput should work fine without this.
+        newMode &= ~ENABLE_ECHO_INPUT;
+        newMode &= ~ENABLE_LINE_INPUT;
+        newMode &= ~ENABLE_PROCESSED_INPUT;
         if (!SetConsoleMode(hConsoleInput, newMode)) {
             std::cerr << "Error setting console mode: " << GetLastError() << std::endl;
         }
     }
 
-    prevDrawnLines.resize(screenRows - 2);
     for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
 
     char buffer[MAX_PATH];
@@ -916,9 +914,10 @@ Editor::Editor() :
         defaultBgColor = csbi.wAttributes & (BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY);
         currentFgColor = defaultFgColor;
         currentBgColor = defaultBgColor;
-    } else {
-        defaultFgColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; // Default white
-        defaultBgColor = 0; // Default black
+    }
+    else {
+        defaultFgColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+        defaultBgColor = 0;
         currentFgColor = defaultFgColor;
         currentBgColor = defaultBgColor;
     }
@@ -926,7 +925,28 @@ Editor::Editor() :
     clearTerminalBuffer();
 
     initializeLua();
-    loadLuaPlugins(); 
+    loadLuaPlugins();
+}
+
+void Editor::initializeLua() {
+    L = luaL_newstate();
+    if (!L) {
+        std::cerr << "Error: Failed to create Lua state." << std::endl;
+        exit(1);
+    }
+
+    int status = luaL_dofile(L, "config.lua");
+    if (status != LUA_OK) {
+        std::cerr << "Warning: Could not load config.lua: " << lua_tostring(L, -1) << std::endl;
+        lua_pop(L, 1);
+    }
+
+    luaL_openlibs(L);
+
+    exposeEditorToLua();
+
+    statusMessage = "Lua interpreter initialized.";
+    statusMessageTime = GetTickCount64();
 }
 
 Editor::~Editor() {
@@ -952,6 +972,8 @@ void Editor::triggerEvent(const std::string& eventName, int param) {
     std::vector<LuaCallback>* callbacks = nullptr;
     if (eventName == "on_key_press") callbacks = &onKeyPressCallbacks;
     else if (eventName == "on_mode_changed") callbacks = &onModeChangedCallbacks;
+    else if (eventName == "on_buffer_changed") callbacks = &onBufferChangedCallbacks; // Ensure all events are handled
+    else if (eventName == "on_cursor_moved") callbacks = &onCursorMovedCallbacks;
 
     if (callbacks) {
         for (const auto& callback : *callbacks) {
@@ -986,27 +1008,6 @@ void Editor::triggerEvent(const std::string& eventName, const std::string& param
             }
         }
     }
-}
-
-void Editor::initializeLua() {
-    L = luaL_newstate();
-    if (!L) {
-        std::cerr << "Error: Failed to create Lua state." << std::endl;
-        exit(1);
-    }
-
-    int status = luaL_dofile(L, "config.lua");
-    if (status != LUA_OK) {
-        std::cerr << "Warning: Could not load config.lua: " << lua_tostring(L, -1) << std::endl;
-        lua_pop(L, 1);
-    }
-
-    luaL_openlibs(L);
-
-    exposeEditorToLua();
-
-    statusMessage = "Lua interpreter initialized.";
-    statusMessageTime = GetTickCount64();
 }
 
 void Editor::finalizeLua() {
@@ -1045,14 +1046,14 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
         return;
     }
     statusMessage = "Loading Lua plugins from '" + pluginDir + "'...";
-    statusMessageTime = GetTickCount64();
+    statusMessageTime = GetTickCount64() + 1000;
 
     CreateDirectoryA(pluginDir.c_str(), NULL);
 
     WIN32_FIND_DATAA findFileData;
     HANDLE hFind = FindFirstFileA((pluginDir + "\\*.lua").c_str(), &findFileData);
     if (hFind == INVALID_HANDLE_VALUE) {
-        statusMessage = "No Lua plugins found in '" + pluginDir + "'"; // This is a status, not an error
+        statusMessage = "No Lua plugins found in '" + pluginDir + "'";
         statusMessageTime = GetTickCount64() + 2000;
         return;
     }
@@ -1067,11 +1068,12 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
         if (status != LUA_OK) {
             std::string error_msg = lua_tostring(L, -1);
             lua_pop(L, 1);
-            show_error("Error loading Lua plugin '" + luaFileName + "': " + error_msg, 10000); // CALL MEMBER FUNCTION
+            show_error("Error loading Lua plugin '" + luaFileName + "': " + error_msg, 10000);
             std::cerr << "Lua Error: " << error_msg << std::endl;
-        } else {
+        }
+        else {
             statusMessage = "Loaded Lua plugin: " + luaFileName;
-            statusMessageTime = GetTickCount64();
+            statusMessageTime = GetTickCount64() + 1000;
 
             lua_getglobal(L, "on_load");
             if (lua_isfunction(L, -1)) {
@@ -1079,10 +1081,11 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
                 if (status != LUA_OK) {
                     std::string error_msg = lua_tostring(L, -1);
                     lua_pop(L, 1);
-                    show_error("Error in plugin 'on_load' for '" + luaFileName + "': " + error_msg, 10000); // CALL MEMBER FUNCTION
+                    show_error("Error in plugin 'on_load' for '" + luaFileName + "': " + error_msg, 10000);
                     std::cerr << "Lua on_load Error: " << error_msg << std::endl;
                 }
-            } else {
+            }
+            else {
                 lua_pop(L, 1);
             }
         }
@@ -1095,6 +1098,10 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
 
 void Editor::show_error(const std::string& message, ULONGLONG duration_ms) {
     this->statusMessage = "Error: " + message;
+    this->statusMessageTime = GetTickCount64();
+}
+void Editor::show_message(const std::string& message, ULONGLONG duration_ms) {
+    this->statusMessage =  message;
     this->statusMessageTime = GetTickCount64();
 }
 
@@ -1509,7 +1516,17 @@ void Editor::scroll() {
         scrolledHorizontally = true;
     }
 
+    colOffset = std::max(0, colOffset);
+    int currentLineRenderedLength = 0;
+    if (cursorY >= 0 && cursorY < lines.size()) {
+        currentLineRenderedLength = getRenderedLine(cursorY).length();
+    }
+
+    int max_possible_colOffset = currentLineRenderedLength - effectiveColsForText;
+    colOffset = std::min(colOffset, std::max(0, max_possible_colOffset));
+
     if (scrolledVertically || scrolledHorizontally) {
+        std::cerr << "  SCROLLED: rowOffset=" << rowOffset << ", colOffset=" << colOffset << std::endl;
         force_full_redraw_internal(); // Only invalidate cache, not clear screen
     }
 }
@@ -1676,8 +1693,9 @@ void Editor::deleteForwardChar() {
     dirty = true;
 }
 
+
 bool Editor::openFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary); // Keep binary mode for accurate line ending detection
+    std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         statusMessage = "Error: Could not open file '" + path + "'";
         statusMessageTime = GetTickCount64();
@@ -1690,13 +1708,11 @@ bool Editor::openFile(const std::string& path) {
     bool lf_detected_in_file = false;
     std::vector<std::string> temp_lines;
 
-    while (std::getline(file, line)) { // getline reads until '\n' and discards it
-        // Check if the extracted line has a trailing '\r' (indicating CRLF)
+    while (std::getline(file, line)) {
         if (!line.empty() && line.back() == '\r') {
-            line.pop_back(); // Remove the '\r'
+            line.pop_back();
             crlf_detected_in_file = true;
         } else {
-            // If no '\r' was at the end, it was an LF-only line
             lf_detected_in_file = true;
         }
         temp_lines.push_back(line);
@@ -1709,8 +1725,8 @@ bool Editor::openFile(const std::string& path) {
     } else if (lf_detected_in_file && !crlf_detected_in_file) {
         currentLineEnding = LE_LF;
     } else if (crlf_detected_in_file && lf_detected_in_file) {
-        currentLineEnding = LE_UNKNOWN; // Mixed line endings
-    } else { 
+        currentLineEnding = LE_UNKNOWN;
+    } else {
         currentLineEnding = LE_CRLF;
     }
 
@@ -1719,13 +1735,15 @@ bool Editor::openFile(const std::string& path) {
     }
 
     filename = path;
-    cursorX = 0;
-    cursorY = 0;
-    rowOffset = 0;
-    colOffset = 0;
+    cursorX = 0; // Cursor at start
+    cursorY = 0; // Cursor at first line
+    rowOffset = 0; // View at top
+    colOffset = 0; // View at left edge (this is the value scroll() might change)
     calculateLineNumberWidth();
     statusMessage = "Opened '" + path + "'";
     statusMessageTime = GetTickCount64();
+
+    scroll();
 
     force_full_redraw_internal();
 
@@ -1748,7 +1766,7 @@ bool Editor::saveFile() {
     for (const auto& line : lines) {
         file << line;
         if (currentLineEnding == LE_CRLF) {
-            file << '/r/n';
+            file << "/r/n";
         } else {
             file << '\n';
         }
@@ -1766,6 +1784,7 @@ int Editor::cxToRx(int lineIndex, int cx)
 
     int rx = 0;
     const std::string& line = lines[lineIndex];
+    cx = std::min(cx, (int)line.length());
     for (int i = 0; i < cx; ++i) {
         if (line[i] == '\t') {
             rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
@@ -1883,22 +1902,26 @@ void Editor::moveFileExplorerSelection(int key) {
     int oldSelectedFileIndex = selectedFileIndex;
     int oldFileExplorerScrollOffset = fileExplorerScrollOffset;
 
-    if (key == ARROW_UP) {
+    // IMPORTANT: Replace custom ARROW_UP, PAGE_UP, HOME_KEY etc.
+    // with their Windows Virtual Key Code equivalents (VK_UP, VK_PRIOR, VK_HOME).
+    // These are consistent with what's being passed from processInput.
+
+    if (key == VK_UP) { // Changed from ARROW_UP
         selectedFileIndex = std::max(0, selectedFileIndex - 1);
     }
-    else if (key == ARROW_DOWN) {
+    else if (key == VK_DOWN) { // Changed from ARROW_DOWN
         selectedFileIndex = std::min((int)directoryEntries.size() - 1, selectedFileIndex + 1);
     }
-    else if (key == PAGE_UP) {
+    else if (key == VK_PRIOR) { // Changed from PAGE_UP (VK_PRIOR is Page Up)
         selectedFileIndex = std::max(0, selectedFileIndex - (screenRows - 4));
     }
-    else if (key == PAGE_DOWN) {
+    else if (key == VK_NEXT) { // Changed from PAGE_DOWN (VK_NEXT is Page Down)
         selectedFileIndex = std::min((int)directoryEntries.size() - 1, selectedFileIndex + (screenRows - 4));
     }
-    else if (key == HOME_KEY) {
+    else if (key == VK_HOME) { // Changed from HOME_KEY
         selectedFileIndex = 0;
     }
-    else if (key == END_KEY) {
+    else if (key == VK_END) { // Changed from END_KEY
         selectedFileIndex = directoryEntries.size() - 1;
     }
 
@@ -1910,11 +1933,8 @@ void Editor::moveFileExplorerSelection(int key) {
     }
 
     if (oldSelectedFileIndex != selectedFileIndex || oldFileExplorerScrollOffset != fileExplorerScrollOffset) {
-        // No clearScreen here. drawFileExplorer will handle partial redraw.
-        // But need to ensure refreshScreen is called (which it is, by main loop)
-        // and that previous lines for status/message are invalidated.
-        prevStatusMessage = ""; // Force status bar redraw
-        prevMessageBarMessage = ""; // Force message bar redraw
+        prevStatusMessage = "";
+        prevMessageBarMessage = "";
     }
 }
 
@@ -2525,8 +2545,8 @@ void Editor::refreshScreen() {
     int finalCursorY = 0;
     if (mode == EDIT_MODE) {
         int renderedCursorInLine = cxToRx(cursorY, cursorX);
-        int cursorXRelativeToTextArea = renderedCursorInLine - colOffset;
-        finalCursorX = lineNumberWidth + cursorXRelativeToTextArea;
+        int cursorXRelativeToVisibleTextArea = renderedCursorInLine - colOffset;
+        finalCursorX = lineNumberWidth + cursorXRelativeToVisibleTextArea;
         finalCursorY = cursorY - rowOffset;
         finalCursorX = std::max(0, std::min(finalCursorX, screenCols - 1));
         finalCursorY = std::max(0, std::min(finalCursorY, screenRows - 3));
@@ -2705,4 +2725,339 @@ std::vector<ConsoleFontInfo> Editor::getAvailableConsoleFonts() {
     }
 
     return commonFonts;
+}
+
+void Editor::registerEditorCommand(const std::string& name, std::function<void()> func) {
+    commandRegistry[name] = func;
+}
+
+void Editor::executeCommand(const std::string& commandName) {
+    if (commandRegistry.count(commandName)) {
+        commandRegistry[commandName]();
+        statusMessage = "Executed Command: " + commandName;
+        statusMessageTime = GetTickCount64();
+    }
+    else {
+        show_error("Unknown Command: " + commandName, 2000);
+    }
+}
+
+bool Editor::loadKeybindings(const std::string& filePath) {
+    std::ifstream file(filePath);
+    if (!file.is_open()) {
+        statusMessage = "keybindings.json not found. Using default keybindings.";
+        statusMessageTime = GetTickCount64() + 2000;
+        return false;
+    }
+
+    try {
+        nlohmann::json j;
+        file >> j;
+        file.close();
+
+        customKeybindings.clear(); // Clear any existing custom bindings
+
+        if (j.is_object()) {
+            for (auto const& [key_str, command_name] : j.items()) {
+                if (!command_name.is_string()) {
+                    show_error("Invalid command name for key '" + key_str + "' in " + filePath + ". Must be a string.", 3000);
+                    continue;
+                }
+
+                // Parse key_str (e.g., "Ctrl+S", "Alt+F1", "A")
+                KeyCombination kc;
+                kc.ctrl = false;
+                kc.alt = false;
+                kc.shift = false;
+                kc.keyCode = 0; // Default to 0
+
+                std::string temp_key_str = key_str;
+                std::transform(temp_key_str.begin(), temp_key_str.end(), temp_key_str.begin(), ::tolower);
+
+                // Parse modifiers
+                if (temp_key_str.find("ctrl+") == 0) {
+                    kc.ctrl = true;
+                    temp_key_str = temp_key_str.substr(5);
+                }
+                if (temp_key_str.find("alt+") == 0) {
+                    kc.alt = true;
+                    temp_key_str = temp_key_str.substr(4);
+                }
+                if (temp_key_str.find("shift+") == 0) {
+                    kc.shift = true;
+                    temp_key_str = temp_key_str.substr(6);
+                }
+
+                // Parse base key (assuming remaining temp_key_str is base key name)
+                if (temp_key_str.length() == 1 && temp_key_str[0] >= 'a' && temp_key_str[0] <= 'z') {
+                    // For single letters (e.g., 'a', 's'), convert to uppercase ASCII (VK_A to VK_Z are ASCII for their uppercase)
+                    kc.keyCode = std::toupper(temp_key_str[0]);
+                }
+                else if (temp_key_str.length() == 1 && temp_key_str[0] >= '0' && temp_key_str[0] <= '9') {
+                    kc.keyCode = temp_key_str[0]; // For numbers, ASCII value
+                }
+                else {
+                    // Handle special key names (e.g., "f1", "enter", "up", "esc")
+                    if (temp_key_str == "f1") kc.keyCode = VK_F1;
+                    else if (temp_key_str == "f2") kc.keyCode = VK_F2;
+                    else if (temp_key_str == "f3") kc.keyCode = VK_F3;
+                    // ... VK_F4 to VK_F12
+                    else if (temp_key_str == "enter") kc.keyCode = VK_RETURN;
+                    else if (temp_key_str == "esc") kc.keyCode = VK_ESCAPE;
+                    else if (temp_key_str == "tab") kc.keyCode = VK_TAB;
+                    else if (temp_key_str == "up") kc.keyCode = VK_UP;
+                    else if (temp_key_str == "down") kc.keyCode = VK_DOWN;
+                    else if (temp_key_str == "left") kc.keyCode = VK_LEFT;
+                    else if (temp_key_str == "right") kc.keyCode = VK_RIGHT;
+                    else if (temp_key_str == "pageup") kc.keyCode = VK_PRIOR;
+                    else if (temp_key_str == "pagedown") kc.keyCode = VK_NEXT;
+                    else if (temp_key_str == "home") kc.keyCode = VK_HOME;
+                    else if (temp_key_str == "end") kc.keyCode = VK_END;
+                    else if (temp_key_str == "delete") kc.keyCode = VK_DELETE;
+                    else if (temp_key_str == "backspace") kc.keyCode = VK_BACK;
+                    else {
+                        show_error("Unknown key name '" + temp_key_str + "' in keybindings.json.", 3000);
+                        continue;
+                    }
+                }
+
+                if (kc.keyCode != 0) {
+                    customKeybindings[kc] = command_name.get<std::string>();
+                }
+                else {
+                    show_error("Failed to parse key combination: " + key_str, 3000);
+                }
+            }
+        }
+        else {
+            show_error("keybindings.json is not a valid JSON object.", 3000);
+            return false;
+        }
+
+        statusMessage = "Loaded keybindings from " + filePath + ".";
+        statusMessageTime = GetTickCount64() + 2000;
+        return true;
+    }
+    catch (const nlohmann::json::parse_error& e) {
+        show_error("Error parsing keybindings.json: " + std::string(e.what()), 5000);
+        return false;
+    }
+    catch (const std::exception& e) {
+        show_error("Unexpected error loading keybindings: " + std::string(e.what()), 5000);
+        return false;
+    }
+}
+
+void Editor::setupDefaultKeybindings() {
+    registerEditorCommand("quit", [this]() {
+        if (mode == EDIT_MODE && isDirty()) {
+            show_error("WARNING: Unsaved changes. Press Ctrl+Q again to quit.", 5000);
+            if (statusMessage.rfind("WARNING: Unsaved changes", 0) == 0 && (statusMessageTime > GetTickCount64())) {
+                should_exit = true;
+            }
+        }
+        else {
+            should_exit = true;
+        }
+        });
+    registerEditorCommand("save_file", [this]() { saveFile(); });
+    registerEditorCommand("open_file_prompt", [this]() {
+        show_message("Open file prompt initiated.", 1500);
+        });
+    registerEditorCommand("toggle_explorer", [this]() { toggleFileExplorer(); });
+    registerEditorCommand("find", [this]() { startSearch(); });
+    registerEditorCommand("find_next", [this]() { findNext(); });
+    registerEditorCommand("find_previous", [this]() { findPrevious(); });
+    registerEditorCommand("toggle_terminal", [this]() { toggleTerminal(); });
+
+    // UNIFIED CURSOR COMMANDS: These commands now handle behavior based on the current mode.
+    // They are correctly defined.
+    registerEditorCommand("cursor_left", [this]() { moveCursor(VK_LEFT); }); // Always VK_LEFT
+    registerEditorCommand("cursor_right", [this]() { moveCursor(VK_RIGHT); }); // Always VK_RIGHT
+    registerEditorCommand("cursor_up", [this]() {
+        if (mode == EDIT_MODE) moveCursor(VK_UP);
+        else if (mode == FILE_EXPLORER_MODE) moveFileExplorerSelection(VK_UP); // Correctly using VK_UP here
+        });
+    registerEditorCommand("cursor_down", [this]() {
+        if (mode == EDIT_MODE) moveCursor(VK_DOWN);
+        else if (mode == FILE_EXPLORER_MODE) moveFileExplorerSelection(VK_DOWN); // Correctly using VK_DOWN here
+        });
+    registerEditorCommand("cursor_home", [this]() {
+        if (mode == EDIT_MODE) moveCursor(VK_HOME);
+        else if (mode == FILE_EXPLORER_MODE) moveFileExplorerSelection(VK_HOME); // Correctly using VK_HOME here
+        });
+    registerEditorCommand("cursor_end", [this]() {
+        if (mode == EDIT_MODE) moveCursor(VK_END);
+        else if (mode == FILE_EXPLORER_MODE) moveFileExplorerSelection(VK_END); // Correctly using VK_END here
+        });
+    registerEditorCommand("page_up", [this]() {
+        if (mode == EDIT_MODE) moveCursor(VK_PRIOR);
+        else if (mode == FILE_EXPLORER_MODE) moveFileExplorerSelection(VK_PRIOR); // Correctly using VK_PRIOR here
+        });
+    registerEditorCommand("page_down", [this]() {
+        if (mode == EDIT_MODE) moveCursor(VK_NEXT);
+        else if (mode == FILE_EXPLORER_MODE) moveFileExplorerSelection(VK_NEXT); // Correctly using VK_NEXT here
+        });
+
+    // Unified Backspace, Delete, Enter, Tab, Escape commands
+    registerEditorCommand("delete_char_backward", [this]() { deleteChar(); });
+    registerEditorCommand("delete_char_forward", [this]() { deleteForwardChar(); });
+    registerEditorCommand("insert_newline_or_action", [this]() {
+        if (mode == EDIT_MODE) insertNewline();
+        else if (mode == FILE_EXPLORER_MODE) handleFileExplorerEnter();
+        else if (mode == PROMPT_MODE) promptUser(promptMessage, VK_RETURN, searchQuery);
+        });
+    registerEditorCommand("insert_tab", [this]() { insertChar('\t'); });
+    registerEditorCommand("escape_or_cancel", [this]() {
+        if (mode == EDIT_MODE) { statusMessage = ""; statusMessageTime = 0; }
+        else if (mode == FILE_EXPLORER_MODE) toggleFileExplorer();
+        else if (mode == PROMPT_MODE) promptUser(promptMessage, VK_ESCAPE, searchQuery);
+        });
+
+
+    // File Explorer Specific Commands (these are for keys *only* used in explorer or special bindings)
+    registerEditorCommand("explorer_new", [this]() {
+        if (mode == FILE_EXPLORER_MODE) show_error("Feature: New file/directory prompt not implemented.", 2000);
+        });
+    registerEditorCommand("explorer_delete", [this]() {
+        if (mode == FILE_EXPLORER_MODE) show_error("Feature: Delete file/directory prompt not implemented.", 2000);
+        });
+
+    static const ConsoleFontInfo smallFont = { "Consolas", 8, 12 };
+    static const ConsoleFontInfo mediumFont = { "Lucida Console", 10, 18 };
+    static const ConsoleFontInfo cascadiaCodeFont = { "Cascadia Code", 12, 24 };
+
+    registerEditorCommand("font_consolas_small", [this]() {
+        setConsoleFont(smallFont);
+        });
+    registerEditorCommand("font_lucida_medium", [this]() {
+        setConsoleFont(mediumFont);
+        });
+    registerEditorCommand("font_cascadia_large", [this]() {
+        setConsoleFont(cascadiaCodeFont);
+        });
+
+    // --- Custom Keybinding Assignments (Only ONE binding per KeyCombination) ---
+    // These assign the raw key to the unified command names.
+    customKeybindings[KeyCombination{ VK_LEFT, false, false, false }] = "cursor_left";
+    customKeybindings[KeyCombination{ VK_RIGHT, false, false, false }] = "cursor_right";
+    customKeybindings[KeyCombination{ VK_UP, false, false, false }] = "cursor_up";
+    customKeybindings[KeyCombination{ VK_DOWN, false, false, false }] = "cursor_down";
+    customKeybindings[KeyCombination{ VK_HOME, false, false, false }] = "cursor_home";
+    customKeybindings[KeyCombination{ VK_END, false, false, false }] = "cursor_end";
+    customKeybindings[KeyCombination{ VK_PRIOR, false, false, false }] = "page_up";
+    customKeybindings[KeyCombination{ VK_NEXT, false, false, false }] = "page_down";
+    customKeybindings[KeyCombination{ VK_BACK, false, false, false }] = "delete_char_backward";
+    customKeybindings[KeyCombination{ VK_DELETE, false, false, false }] = "delete_char_forward";
+    customKeybindings[KeyCombination{ VK_RETURN, false, false, false }] = "insert_newline_or_action";
+    customKeybindings[KeyCombination{ VK_TAB, false, false, false }] = "insert_tab";
+    customKeybindings[KeyCombination{ VK_ESCAPE, false, false, false }] = "escape_or_cancel";
+
+    customKeybindings[KeyCombination{ 'S', true, false, false }] = "save_file";
+    customKeybindings[KeyCombination{ 'Q', true, false, false }] = "quit";
+    customKeybindings[KeyCombination{ 'O', true, false, false }] = "open_file_prompt";
+    customKeybindings[KeyCombination{ 'E', true, false, false }] = "toggle_explorer";
+    customKeybindings[KeyCombination{ 'F', true, false, false }] = "find";
+    customKeybindings[KeyCombination{ 'N', true, false, false }] = "find_next";
+    customKeybindings[KeyCombination{ 'P', true, false, false }] = "find_previous";
+    customKeybindings[KeyCombination{ 'T', true, false, false }] = "toggle_terminal";
+
+    customKeybindings[KeyCombination{ VK_F1, true, false, false }] = "font_consolas_small";
+    customKeybindings[KeyCombination{ VK_F2, true, false, false }] = "font_lucida_medium";
+    customKeybindings[KeyCombination{ VK_F3, true, false, false }] = "font_cascadia_large";
+
+    // These are for specific actions (N/D keys) in File Explorer mode that don't
+    // necessarily map to typical editor actions. They will be triggered when 'N' or 'D'
+    // is pressed without modifiers, and their lambda checks `if (mode == FILE_EXPLORER_MODE)`.
+    customKeybindings[KeyCombination{ 'N', false, false, false }] = "explorer_new";
+    customKeybindings[KeyCombination{ 'D', false, false, false }] = "explorer_delete";
+}
+
+void Editor::processInput(int raw_key_code, char ascii_char, DWORD control_key_state) {
+    ctrl_pressed = (control_key_state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+    bool alt_pressed_local = (control_key_state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0;
+    bool shift_pressed_local = (control_key_state & SHIFT_PRESSED) != 0;
+
+    bool handled_by_lua = false;
+    for (const auto& callback : onKeyPressCallbacks) {
+        lua_rawgeti(callback.L_state, LUA_REGISTRYINDEX, callback.funcRef);
+        lua_pushinteger(callback.L_state, raw_key_code);
+        int status = lua_pcall(callback.L_state, 1, 1, 0);
+        if (status == LUA_OK && lua_isboolean(callback.L_state, -1) && lua_toboolean(callback.L_state, -1)) {
+            handled_by_lua = true;
+        }
+        else if (status != LUA_OK) {
+            lua_pop(callback.L_state, 1);
+        }
+        lua_pop(callback.L_state, 1);
+        if (handled_by_lua) break;
+    }
+
+    if (handled_by_lua) {
+        return;
+    }
+
+    KeyCombination current_kc = { raw_key_code, ctrl_pressed, alt_pressed_local, shift_pressed_local };
+    if (customKeybindings.count(current_kc)) {
+        executeCommand(customKeybindings[current_kc]);
+        return;
+    }
+
+    if (raw_key_code == 'Q' && ctrl_pressed) {
+        if (mode == EDIT_MODE && isDirty()) {
+            statusMessage = "WARNING: Unsaved changes. Ctrl-Q again to quit.";
+            statusMessageTime = GetTickCount64() + 5000;
+            return;
+        }
+    }
+
+    if (mode == EDIT_MODE) {
+        if (ascii_char != 0 && ascii_char >= 32 && ascii_char <= 126) {
+            if (!ctrl_pressed && !alt_pressed_local) {
+                insertChar(ascii_char);
+            }
+        }
+    }
+    else if (mode == PROMPT_MODE) {
+        int prompt_input_char = 0;
+        if (raw_key_code == VK_RETURN) prompt_input_char = 13;
+        else if (raw_key_code == VK_ESCAPE) prompt_input_char = 27;
+        else if (raw_key_code == VK_BACK) prompt_input_char = 8;
+        else if (ascii_char != 0 && ascii_char >= 32 && ascii_char <= 126) prompt_input_char = ascii_char;
+
+        if (prompt_input_char != 0) {
+            if (promptUser(promptMessage, prompt_input_char, searchQuery)) {
+                if (promptMessage.rfind("Search:", 0) == 0) {
+                    performSearch();
+                }
+                force_full_redraw_internal();
+            }
+        }
+    }
+    else if (mode == FILE_EXPLORER_MODE) {
+        // This block is now empty. All specific explorer keys are handled
+        // by the customKeybindings map lookup at the top of this function.
+    }
+    else if (mode == TERMINAL_MODE) {
+        if (ascii_char != 0) {
+            writeTerminalInput(std::string(1, ascii_char));
+        }
+        else {
+            if (ctrl_pressed && raw_key_code == 'C') {
+                writeTerminalInput("\x03");
+            }
+            else if (raw_key_code == VK_UP) {
+                writeTerminalInput("\x1b[A");
+            }
+            else if (raw_key_code == VK_DOWN) {
+                writeTerminalInput("\x1b[B");
+            }
+            else if (raw_key_code == VK_LEFT) {
+                writeTerminalInput("\x1b[D");
+            }
+            else if (raw_key_code == VK_RIGHT) {
+                writeTerminalInput("\x1b[C");
+            }
+        }
+    }
 }
