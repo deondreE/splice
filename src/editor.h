@@ -187,6 +187,7 @@ public:
     std::vector<ConsoleFontInfo> getAvailableConsoleFonts();
 
     int kiloTabStop = KILO_TAB_STOP;
+    void show_error(const std::string& message, ULONGLONG duration_ms = 8000);
 
 private:
 	void drawScreenContent();

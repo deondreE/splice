@@ -57,7 +57,6 @@ int lua_set_tab_stop_width(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
     if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (width) must be an integer.");
-
     int width = lua_tointeger(L, 1);
     if (width > 0 && width <= 16) {
         editor->kiloTabStop = width;
@@ -65,8 +64,9 @@ int lua_set_tab_stop_width(lua_State* L) {
         editor->force_full_redraw_internal();
         editor->statusMessage = "Tab stop width set to " + std::to_string(width);
         editor->statusMessageTime = GetTickCount64() + 2000;
-    }else {
-        return luaL_error(L, "Invalid tab stop width. Must be between 1 and 16.");
+    } else {
+        editor->show_error("Invalid tab stop width. Must be between 1 and 16.", 3000); // CALL MEMBER FUNCTION
+        return luaL_error(L, "Invalid tab stop width. Must be between 1 and 16."); // Still return Lua error
     }
     return 0;
 }
@@ -75,7 +75,6 @@ int lua_set_default_line_ending(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
     if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (type) must be a string ('CRLF' or 'LF').");
-
     std::string type = lua_tostring(L, 1);
     if (type == "CRLF") {
         editor->currentLineEnding = Editor::LE_CRLF;
@@ -84,7 +83,8 @@ int lua_set_default_line_ending(lua_State* L) {
         editor->currentLineEnding = Editor::LE_LF;
         editor->statusMessage = "Default line ending set to LF";
     } else {
-        return luaL_error(L, "Invalid line ending type. Must be 'CRLF' or 'LF'.");
+        editor->show_error("Invalid line ending type. Must be 'CRLF' or 'LF'.", 3000);
+        return luaL_error(L, "Invalid line ending type. Must be 'CRLF' or 'LF'."); 
     }
     editor->statusMessageTime = GetTickCount64() + 2000;
     return 0;
@@ -959,8 +959,10 @@ void Editor::triggerEvent(const std::string& eventName, int param) {
             lua_pushinteger(callback.L_state, param);
             int status = lua_pcall(callback.L_state, 1, 0, 0);
             if (status != LUA_OK) {
-                std::cerr << "Error in Lua event '" << eventName << "': " << lua_tostring(callback.L_state, -1) << std::endl;
+                std::string error_msg = lua_tostring(callback.L_state, -1);
                 lua_pop(callback.L_state, 1);
+                show_error("Error in Lua event '" + eventName + "': " + error_msg, 10000);
+                std::cerr << "Error in Lua event '" << eventName << "': " << error_msg << std::endl;
             }
         }
     }
@@ -977,8 +979,10 @@ void Editor::triggerEvent(const std::string& eventName, const std::string& param
             lua_pushstring(callback.L_state, param.c_str());
             int status = lua_pcall(callback.L_state, 1, 0, 0);
             if (status != LUA_OK) {
-                std::cerr << "Error in Lua event '" << eventName << "': " << lua_tostring(callback.L_state, -1) << std::endl;
+                std::string error_msg = lua_tostring(callback.L_state, -1);
                 lua_pop(callback.L_state, 1);
+                show_error("Error in Lua event '" + eventName + "': " + error_msg, 10000);
+                std::cerr << "Error in Lua event '" << eventName << "': " << error_msg << std::endl;
             }
         }
     }
@@ -1037,8 +1041,7 @@ void Editor::exposeEditorToLua() {
 
 void Editor::loadLuaPlugins(const std::string& pluginDir) {
     if (!L) {
-        statusMessage = "Lua interpreter not initialized, cannot load plugins.";
-        statusMessageTime = GetTickCount64();
+        show_error("Lua interpreter not initialized, cannot load plugins.");
         return;
     }
     statusMessage = "Loading Lua plugins from '" + pluginDir + "'...";
@@ -1048,10 +1051,9 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
 
     WIN32_FIND_DATAA findFileData;
     HANDLE hFind = FindFirstFileA((pluginDir + "\\*.lua").c_str(), &findFileData);
-
     if (hFind == INVALID_HANDLE_VALUE) {
-        statusMessage = "No Lua plugins found in '" + pluginDir + "'";
-        statusMessageTime = GetTickCount64();
+        statusMessage = "No Lua plugins found in '" + pluginDir + "'"; // This is a status, not an error
+        statusMessageTime = GetTickCount64() + 2000;
         return;
     }
 
@@ -1065,8 +1067,7 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
         if (status != LUA_OK) {
             std::string error_msg = lua_tostring(L, -1);
             lua_pop(L, 1);
-            statusMessage = "Error loading Lua plugin '" + luaFileName + "': " + error_msg;
-            statusMessageTime = GetTickCount64();
+            show_error("Error loading Lua plugin '" + luaFileName + "': " + error_msg, 10000); // CALL MEMBER FUNCTION
             std::cerr << "Lua Error: " << error_msg << std::endl;
         } else {
             statusMessage = "Loaded Lua plugin: " + luaFileName;
@@ -1078,8 +1079,7 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
                 if (status != LUA_OK) {
                     std::string error_msg = lua_tostring(L, -1);
                     lua_pop(L, 1);
-                    statusMessage = "Error in plugin 'on_load': " + error_msg;
-                    statusMessageTime = GetTickCount64();
+                    show_error("Error in plugin 'on_load' for '" + luaFileName + "': " + error_msg, 10000); // CALL MEMBER FUNCTION
                     std::cerr << "Lua on_load Error: " << error_msg << std::endl;
                 }
             } else {
@@ -1093,20 +1093,22 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
     statusMessageTime = GetTickCount64();
 }
 
+void Editor::show_error(const std::string& message, ULONGLONG duration_ms) {
+    this->statusMessage = "Error: " + message;
+    this->statusMessageTime = GetTickCount64();
+}
+
 bool Editor::executeLuaPluginCommand(const std::string& pluginName, const std::string& commandName) {
     if (!L) {
-        statusMessage = "Lua interpreter not initialized, cannot execute plugin command.";
-        statusMessageTime = GetTickCount64();
+        show_error("Lua interpreter not initialized, cannot execute plugin command.");
         return false;
     }
-    
     lua_getglobal(L, commandName.c_str());
 
     if (!lua_isfunction(L, -1)) {
         std::string type_name = lua_typename(L, lua_type(L, -1));
+        show_error("Command '" + commandName + "' not found or not a function in Lua. Type was: " + type_name); // CALL MEMBER FUNCTION
         lua_pop(L, 1);
-        statusMessage = "Command '" + commandName + "' not found or not a function in Lua. Type was: " + type_name;
-        statusMessageTime = GetTickCount64();
         return false;
     }
 
@@ -1114,8 +1116,7 @@ bool Editor::executeLuaPluginCommand(const std::string& pluginName, const std::s
     if (status != LUA_OK) {
         std::string error_msg = lua_tostring(L, -1);
         lua_pop(L, 1);
-        statusMessage = "Error executing Lua command '" + commandName + "': " + error_msg;
-        statusMessageTime = GetTickCount64();
+        show_error("Lua Plugin Error in '" + commandName + "': " + error_msg, 10000); // CALL MEMBER FUNCTION
         std::cerr << "Lua Command Error: " << error_msg << std::endl;
         return false;
     }
@@ -1733,15 +1734,13 @@ bool Editor::openFile(const std::string& path) {
 }
 bool Editor::saveFile() {
     if (filename.empty()) {
-        statusMessage = "Cannot save: No filename specified. Use Ctrl-O to open/create a file.";
-        statusMessageTime = GetTickCount64();
+        show_error("Cannot save: No filename specified. Use Ctrl-O to open/create a file.", 5000);
         return false;
     }
 
     std::ofstream file(filename);
     if (!file.is_open()) {
-        statusMessage = "Error: Could not save file '" + filename + "'";
-        statusMessageTime = GetTickCount64();
+        show_error("Could not save file '" + filename + "'", 5000); // CALL MEMBER FUNCTION
         dirty = false;
         return false;
     }
@@ -1928,8 +1927,7 @@ void Editor::handleFileExplorerEnter() {
 
     char newPathBuffer[MAX_PATH];
     if (PathCombineA(newPathBuffer, currentDirPath.c_str(), selectedEntry.name.c_str()) == NULL) {
-        statusMessage = "Error: Invalid path combination.";
-        statusMessageTime = GetTickCount64();
+        show_error("Invalid path combination.", 5000);
         return;
     }
     std::string newPath = newPathBuffer;
@@ -2076,24 +2074,19 @@ void Editor::startTerminal() {
     saAttr.lpSecurityDescriptor = NULL;
 
     if (!CreatePipe(&hChildStdoutRead, &hChildStdoutWrite, &saAttr, 0)) {
-        statusMessage = "Error: Stdout pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
-        statusMessageTime = GetTickCount64(); 
+        show_error("Stdout pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")", 5000);
         return;
     }
     if (!SetHandleInformation(hChildStdoutRead, HANDLE_FLAG_INHERIT, 0)) {
-        statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
-        statusMessageTime = GetTickCount64(); 
+        show_error("Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")", 5000);
         CloseHandle(hChildStdoutRead); CloseHandle(hChildStdoutWrite);
         return;
     }
 
     if (!CreatePipe(&hChildStdinRead, &hChildStdinWrite, &saAttr, 0)) {
-        statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
-        statusMessageTime = GetTickCount64();
-        CloseHandle(hChildStdinRead); 
-        CloseHandle(hChildStdinWrite);
-        CloseHandle(hChildStdoutRead); 
-        CloseHandle(hChildStdoutWrite);
+        show_error("Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")", 5000); // CALL MEMBER FUNCTION
+        CloseHandle(hChildStdinRead); CloseHandle(hChildStdinWrite);
+        CloseHandle(hChildStdoutRead); CloseHandle(hChildStdoutWrite);
         return;
     }
 
@@ -2124,9 +2117,7 @@ void Editor::startTerminal() {
     );
 
     if (!success) {
-        statusMessage = "Error: Failed to create child process. (GLE: " + std::to_string(GetLastError()) + ")";
-        statusMessageTime = GetTickCount64();
-        
+        show_error("Failed to create child process. (GLE: " + std::to_string(GetLastError()) + ")", 5000); // CALL MEMBER FUNCTION
         CloseHandle(hChildStdinRead); CloseHandle(hChildStdinWrite);
         CloseHandle(hChildStdoutRead); CloseHandle(hChildStdoutWrite);
         return;
@@ -2614,16 +2605,14 @@ void Editor::force_full_redraw_internal() {
 bool Editor::setConsoleFont(const ConsoleFontInfo& fontInfo) {
     HANDLE hConsoleOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hConsoleOutput == INVALID_HANDLE_VALUE) {
-        statusMessage = "Error: Invalid console output handle for font setting.";
-        statusMessageTime = GetTickCount64() + 3000;
+        show_error("Invalid console output handle for font setting.", 3000); // CALL MEMBER FUNCTION
         return false;
     }
 
     CONSOLE_FONT_INFOEX cfi;
     cfi.cbSize = sizeof(cfi);
     if (!GetCurrentConsoleFontEx(hConsoleOutput, FALSE, &cfi)) {
-        statusMessage = "Error: GetCurrentConsoleFontEx failed for font setting. GLE: " + std::to_string(GetLastError());
-        statusMessageTime = GetTickCount64() + 3000;
+        show_error("GetCurrentConsoleFontEx failed for font setting. GLE: " + std::to_string(GetLastError()), 3000); // CALL MEMBER FUNCTION
         return false;
     }
 
@@ -2634,8 +2623,7 @@ bool Editor::setConsoleFont(const ConsoleFontInfo& fontInfo) {
     MultiByteToWideChar(CP_ACP, 0, fontInfo.name.c_str(), -1, cfi.FaceName, LF_FACESIZE);
 
     if (!SetCurrentConsoleFontEx(hConsoleOutput, FALSE, &cfi)) {
-        statusMessage = "Error: SetCurrentConsoleFontEx failed. GLE: " + std::to_string(GetLastError());
-        statusMessageTime = GetTickCount64() + 3000;
+        show_error("SetCurrentConsoleFontEx failed. GLE: " + std::to_string(GetLastError()), 3000); // CALL MEMBER FUNCTION
         return false;
     }
 
@@ -2671,8 +2659,7 @@ std::vector<ConsoleFontInfo> Editor::getAvailableConsoleFonts() {
 
     HDC hdc = GetDC(NULL);
     if (!hdc) {
-        statusMessage = "Error: Could not get screen device context for fonts.";
-        statusMessageTime = GetTickCount64() + 3000;
+        show_error("Could not get screen device context for fonts.", 3000); // CALL MEMBER FUNCTION
         return {};
     }
 
