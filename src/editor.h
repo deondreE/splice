@@ -61,6 +61,13 @@ public:
 	std::string statusMessage;
 	ULONGLONG statusMessageTime;
 
+    enum LineEnding {
+        LE_CRLF, // \r\n (Windows)
+        LE_LF,   // \n   (Unix, macOS, Linux)
+        LE_UNKNOWN // Mixed or not yet detected
+    };
+    LineEnding currentLineEnding = LE_CRLF;
+
 	lua_State* L;
 
 	std::vector<std::string> prevDrawnLines;
@@ -178,6 +185,8 @@ public:
     bool setConsoleFont(const ConsoleFontInfo& fontInfo);
     ConsoleFontInfo getCurrentConsoleFont();
     std::vector<ConsoleFontInfo> getAvailableConsoleFonts();
+
+    int kiloTabStop = KILO_TAB_STOP;
 
 private:
 	void drawScreenContent();

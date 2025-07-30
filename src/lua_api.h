@@ -74,6 +74,10 @@ int lua_execute_command(lua_State* L);
 int lua_register_event_handler(lua_State* L);
 int lua_is_ctrl_pressed(lua_State* L); // For checking key modifiers
 
+// Config
+int lua_set_tab_stop_width(lua_State* L);
+int lua_set_default_line_ending(lua_State* L);
+
 // Plugin data persistence
 int lua_save_plugin_data(lua_State* L);
 int lua_load_plugin_data(lua_State* L);

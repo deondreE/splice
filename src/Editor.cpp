@@ -53,6 +53,43 @@ int lua_get_current_time_ms(lua_State* L) {
     return 1;
 }
 
+int lua_set_tab_stop_width(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (width) must be an integer.");
+
+    int width = lua_tointeger(L, 1);
+    if (width > 0 && width <= 16) {
+        editor->kiloTabStop = width;
+        editor->calculateLineNumberWidth();
+        editor->force_full_redraw_internal();
+        editor->statusMessage = "Tab stop width set to " + std::to_string(width);
+        editor->statusMessageTime = GetTickCount64() + 2000;
+    }else {
+        return luaL_error(L, "Invalid tab stop width. Must be between 1 and 16.");
+    }
+    return 0;
+}
+
+int lua_set_default_line_ending(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (type) must be a string ('CRLF' or 'LF').");
+
+    std::string type = lua_tostring(L, 1);
+    if (type == "CRLF") {
+        editor->currentLineEnding = Editor::LE_CRLF;
+        editor->statusMessage = "Default line ending set to CRLF";
+    } else if (type == "LF") {
+        editor->currentLineEnding = Editor::LE_LF;
+        editor->statusMessage = "Default line ending set to LF";
+    } else {
+        return luaL_error(L, "Invalid line ending type. Must be 'CRLF' or 'LF'.");
+    }
+    editor->statusMessageTime = GetTickCount64() + 2000;
+    return 0;
+}
+
 int lua_refresh_screen(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
@@ -834,6 +871,7 @@ Editor::Editor() :
     terminalScrollOffset(0),
     terminalHeight(0),
     terminalWidth(0),
+    currentLineEnding(LE_CRLF),
     hChildStdinRead(NULL), hChildStdinWrite(NULL), hChildStdoutRead(NULL), hChildStdoutWrite(NULL),
     hConsoleInput(INVALID_HANDLE_VALUE), originalConsoleMode(0),
     currentFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE), // Default white
@@ -951,6 +989,12 @@ void Editor::initializeLua() {
     if (!L) {
         std::cerr << "Error: Failed to create Lua state." << std::endl;
         exit(1);
+    }
+
+    int status = luaL_dofile(L, "config.lua");
+    if (status != LUA_OK) {
+        std::cerr << "Warning: Could not load config.lua: " << lua_tostring(L, -1) << std::endl;
+        lua_pop(L, 1);
     }
 
     luaL_openlibs(L);
@@ -1358,26 +1402,35 @@ void Editor::drawStatusBar() {
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hConsole == INVALID_HANDLE_VALUE) return;
 
+    std::string mode_display;
+    switch(mode) {
+        case EDIT_MODE: mode_display = " EDIT "; break;
+        case FILE_EXPLORER_MODE: mode_display = " FILE_EXPLORER_MODE "; break;
+        case PROMPT_MODE: mode_display = " PROMPT_MODE "; break;
+        case TERMINAL_MODE: mode_display = " TERMINAL_MODE "; break;
+        default: mode_display = " UNKNOWN "; break;
+    }
+
+    std::string left_aligned_info = mode_display;
+
     std::string currentStatus;
     std::string filename_display = filename.empty() ? "[No Name]" : filename;
-    currentStatus += filename_display;
-
     if (isDirty()) {
-        currentStatus += "*";
+        filename_display += "*";
     }
 
-    currentStatus += " - " + std::to_string(lines.size()) + " lines";
+    std::string right_aligned_info = std::to_string(cursorY + 1) + "/" + std::to_string(lines.size()) +
+        " Ln" + std::to_string(cursorY + 1) + " Col" + std::to_string(cursorX + 1);
 
-    std::string cursor_info = std::to_string(cursorY + 1) + "/" + std::to_string(lines.size());
-    std::string spaces(screenCols - currentStatus.length() - cursor_info.length(), ' ');
+    currentStatus = left_aligned_info + " " + filename_display;
 
-    currentStatus += spaces + cursor_info;
-
-    if (currentStatus.length() < screenCols) {
-        currentStatus += std::string(screenCols - currentStatus.length(), ' ');
-    } else if (currentStatus.length() > screenCols) {
-        currentStatus = currentStatus.substr(0, screenCols);
+    int padding_needed = screenCols - currentStatus.length() - right_aligned_info.length();
+    if (padding_needed > 0) {
+        currentStatus += std::string(padding_needed, ' '); 
+    } else {
+        currentStatus = currentStatus.substr(0, screenCols - right_aligned_info.length());
     }
+    currentStatus += right_aligned_info;
 
     if (currentStatus != prevStatusMessage) {
         std::vector<WORD> attributes(screenCols);
@@ -1623,7 +1676,7 @@ void Editor::deleteForwardChar() {
 }
 
 bool Editor::openFile(const std::string& path) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary); // Keep binary mode for accurate line ending detection
     if (!file.is_open()) {
         statusMessage = "Error: Could not open file '" + path + "'";
         statusMessageTime = GetTickCount64();
@@ -1632,10 +1685,33 @@ bool Editor::openFile(const std::string& path) {
 
     lines.clear();
     std::string line;
-    while (std::getline(file, line)) {
-        lines.push_back(line);
+    bool crlf_detected_in_file = false;
+    bool lf_detected_in_file = false;
+    std::vector<std::string> temp_lines;
+
+    while (std::getline(file, line)) { // getline reads until '\n' and discards it
+        // Check if the extracted line has a trailing '\r' (indicating CRLF)
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back(); // Remove the '\r'
+            crlf_detected_in_file = true;
+        } else {
+            // If no '\r' was at the end, it was an LF-only line
+            lf_detected_in_file = true;
+        }
+        temp_lines.push_back(line);
     }
     file.close();
+    lines = temp_lines;
+
+    if (crlf_detected_in_file && !lf_detected_in_file) {
+        currentLineEnding = LE_CRLF;
+    } else if (lf_detected_in_file && !crlf_detected_in_file) {
+        currentLineEnding = LE_LF;
+    } else if (crlf_detected_in_file && lf_detected_in_file) {
+        currentLineEnding = LE_UNKNOWN; // Mixed line endings
+    } else { 
+        currentLineEnding = LE_CRLF;
+    }
 
     if (lines.empty()) {
         lines.push_back("");
@@ -1650,12 +1726,11 @@ bool Editor::openFile(const std::string& path) {
     statusMessage = "Opened '" + path + "'";
     statusMessageTime = GetTickCount64();
 
-    force_full_redraw_internal(); // Force a full redraw after file open
+    force_full_redraw_internal();
 
     dirty = false;
     return true;
 }
-
 bool Editor::saveFile() {
     if (filename.empty()) {
         statusMessage = "Cannot save: No filename specified. Use Ctrl-O to open/create a file.";
@@ -1672,7 +1747,12 @@ bool Editor::saveFile() {
     }
 
     for (const auto& line : lines) {
-        file << line << "\r\n";
+        file << line;
+        if (currentLineEnding == LE_CRLF) {
+            file << '/r/n';
+        } else {
+            file << '\n';
+        }
     }
     file.close();
 
