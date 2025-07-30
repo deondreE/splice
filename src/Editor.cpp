@@ -11,6 +11,118 @@ DWORD WINAPI TerminalOutputReaderThread(LPVOID lpParam);
 
 #pragma region  Lua
 
+int lua_get_current_filename(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushstring(L, editor->filename.c_str());
+    return 1;
+}
+
+int lua_set_status_message(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    // Check arguments: expects (string message)
+    if (!lua_isstring(L, 1)) {
+        return luaL_error(L, "Argument #1 (message) for set_status_message must be a string.");
+    }
+    std::string message = lua_tostring(L, 1);
+
+    // Optional: a duration can be passed as a second argument (as discussed previously)
+    ULONGLONG duration_ms = 5000; // Default 5 seconds, match original logic
+    if (lua_isinteger(L, 2)) {
+        duration_ms = lua_tointeger(L, 2);
+    }
+
+    editor->statusMessage = message;
+    // Set expiry time based on current tick count + duration
+    editor->statusMessageTime = GetTickCount64() + duration_ms;
+    return 0; // Number of return values on the Lua stack
+}
+
+int lua_get_current_time_ms(lua_State* L) {
+    // GetTickCount64() is a Windows-specific function.
+    // If you plan cross-platform, you'd use a C++ standard library chrono function.
+    lua_pushinteger(L, GetTickCount64());
+    return 1;
+}
+
+int lua_refresh_screen(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    // Call the main screen refresh logic
+    editor->refreshScreen();
+    return 0;
+}
+
+int lua_insert_text(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    // Check arguments: expects (string text)
+    if (!lua_isstring(L, 1)) {
+        return luaL_error(L, "Argument #1 (text) for insert_text must be a string.");
+    }
+    std::string text = lua_tostring(L, 1);
+
+    // Call the Editor's internal method to insert characters
+    // This loops through chars, handling newlines and tab expansion correctly.
+    for (char c : text) {
+        if (c == '\n') {
+            editor->insertNewline();
+        } else {
+            editor->insertChar(c);
+        }
+    }
+    editor->dirty = true; // Mark buffer as modified
+    editor->calculateLineNumberWidth(); // Recalculate if lines added/removed
+    editor->triggerEvent("on_buffer_changed"); // Notify plugins of buffer change
+    editor->triggerEvent("on_cursor_moved");   // Notify plugins of cursor movement
+    return 0;
+}
+
+int lua_get_current_line_text(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    std::string line_text = "";
+    // Ensure cursorY is within valid bounds before accessing `lines` vector
+    if (editor->cursorY >= 0 && editor->cursorY < editor->lines.size()) {
+        line_text = editor->lines[editor->cursorY];
+    }
+    lua_pushstring(L, line_text.c_str());
+    return 1; // Return 1 value (the string)
+}
+
+int lua_get_line_count(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->lines.size());
+    return 1;
+}
+
+int lua_get_cursor_y(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->cursorY + 1); // Lua is 1-based for display
+    return 1;
+}
+
+int lua_force_full_redraw(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    editor->force_full_redraw_internal(); // Call the Editor's member function
+    return 0;
+}
+
+int lua_get_cursor_x(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->cursorX + 1); // Lua is 1-based for display
+    return 1;
+}
+
 int lua_get_line(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
@@ -604,18 +716,19 @@ std::map<std::string, std::string> Editor::plugin_data_storage;
 
 // Update the `editor_lib` array to include all new functions
 static const luaL_Reg editor_lib[] = {
-    {"set_status_message", lua_set_status_message},
+    // Existing functions that are now fully implemented or refined
+    {"set_status_message", lua_set_status_message}, // Refined to accept duration
     {"get_current_time_ms", lua_get_current_time_ms},
     {"refresh_screen", lua_refresh_screen},
-    {"force_full_redraw", lua_force_full_redraw}, // Old method for full redraw, should call internal
-    {"insert_text", lua_insert_text},
+    {"force_full_redraw", lua_force_full_redraw}, // Now calls Editor::force_full_redraw_internal()
+    {"insert_text", lua_insert_text},             // Refined to use insertChar/insertNewline
     {"get_current_line_text", lua_get_current_line_text},
     {"get_line_count", lua_get_line_count},
-    {"get_cursor_x", lua_get_cursor_x},
-    {"get_cursor_y", lua_get_cursor_y},
+    {"get_cursor_x", lua_get_cursor_x},             // Returns 1-based index
+    {"get_cursor_y", lua_get_cursor_y},             // Returns 1-based index
     {"get_current_filename", lua_get_current_filename},
 
-    // New functions
+    // New functions from the expanded API
     {"get_line", lua_get_line},
     {"set_line", lua_set_line},
     {"insert_line", lua_insert_line},
@@ -624,7 +737,7 @@ static const luaL_Reg editor_lib[] = {
     {"set_buffer_content", lua_set_buffer_content},
     {"get_char_at", lua_get_char_at},
     {"get_tab_stop_width", lua_get_tab_stop_width},
-    {"set_cursor_position", lua_set_cursor_position},
+    {"set_cursor_position", lua_set_cursor_position}, // Expects 1-based x, y
     {"set_row_offset", lua_set_row_offset},
     {"set_col_offset", lua_set_col_offset},
     {"get_row_offset", lua_get_row_offset},
@@ -640,7 +753,7 @@ static const luaL_Reg editor_lib[] = {
     {"create_directory", lua_create_directory},
     {"delete_file", lua_delete_file},
     {"delete_directory", lua_delete_directory},
-    {"prompt", lua_prompt_user}, // 'prompt' is a nicer Lua name
+    {"prompt", lua_prompt_user}, // 'prompt' is a nicer Lua name, initiates prompt mode
     {"show_message", lua_show_message},
     {"show_error", lua_show_error},
     {"get_screen_size", lua_get_screen_size},
@@ -654,7 +767,7 @@ static const luaL_Reg editor_lib[] = {
     {"is_ctrl_pressed", lua_is_ctrl_pressed},
     {"save_plugin_data", lua_save_plugin_data},
     {"load_plugin_data", lua_load_plugin_data},
-    {NULL, NULL}
+    {NULL, NULL}  // Sentinel to mark the end of the array
 };
 #pragma endregion
 
@@ -719,6 +832,12 @@ Editor::Editor() :
 
 Editor::~Editor() {
     finalizeLua();
+    for (const auto& cb : onKeyPressCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
+    for (const auto& cb : onFileOpenedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
+    for (const auto& cb : onFileSavedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
+    for (const auto& cb : onBufferChangedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
+    for (const auto& cb : onCursorMovedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
+    for (const auto& cb : onModeChangedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
     stopTerminal();
 }
 
@@ -2238,4 +2357,63 @@ void Editor::refreshScreen() {
     else { 
         setCursorPosition(0, (selectedFileIndex - fileExplorerScrollOffset) + (screenRows - 2));
     }
+}
+
+void Editor::clearScreen() {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) {
+        std::cerr << "Error: Invalid console handle in clearScreen." << std::endl;
+        return;
+    }
+
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (!GetConsoleScreenBufferInfo(hConsole, &csbi)) {
+        std::cerr << "Error: GetConsoleScreenBufferInfo failed in clearScreen. GLE: " << GetLastError() << std::endl;
+        return;
+    }
+
+    DWORD cellsCount = csbi.dwSize.X * csbi.dwSize.Y;
+    COORD homeCoords = { 0, 0 };
+    DWORD charsWritten;
+
+    // Fill the entire screen buffer with spaces
+    if (!FillConsoleOutputCharacterA(hConsole,      // Handle to console screen buffer
+                                     (TCHAR)' ',    // Character to write to the buffer
+                                     cellsCount,    // Number of cells to write
+                                     homeCoords,    // Coordinate of the first cell
+                                     &charsWritten)) // Number of characters written
+    {
+        std::cerr << "Error: FillConsoleOutputCharacterA failed in clearScreen. GLE: " << GetLastError() << std::endl;
+        return;
+    }
+
+    // Fill the entire screen buffer with the current default attributes
+    // This ensures consistent background/foreground colors after clearing.
+    // Using defaultFgColor and defaultBgColor stored in Editor for consistency.
+    if (!FillConsoleOutputAttribute(hConsole,        // Handle to console screen buffer
+                                    defaultFgColor | defaultBgColor, // Attributes to set
+                                    cellsCount,      // Number of cells to set attributes
+                                    homeCoords,      // Coordinate of the first cell
+                                    &charsWritten))  // Number of cells modified
+    {
+        std::cerr << "Error: FillConsoleOutputAttribute failed in clearScreen. GLE: " << GetLastError() << std::endl;
+        return;
+    }
+
+    // Move the cursor to the home position (top-left)
+    SetConsoleCursorPosition(hConsole, homeCoords);
+}
+
+void Editor::force_full_redraw_internal() {
+    for (auto& s : prevDrawnLines) {
+        s.assign(screenCols, ' '); // Fill with spaces to force a diff
+    }
+
+    // Invalidate cached status and message bar content
+    prevStatusMessage = "";
+    prevMessageBarMessage = "";
+
+    // Clear the *entire console* to remove any lingering artifacts or old content.
+    // This is especially important when switching modes (editor to explorer/terminal).
+    clearScreen();
 }
