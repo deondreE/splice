@@ -3,11 +3,22 @@
 #include <algorithm>
 #include "win_console_utils.h"
 #include <iostream>
+#include <map>
 #include "lua_api.h"
 #include <Shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 
 DWORD WINAPI TerminalOutputReaderThread(LPVOID lpParam);
+struct FontEnumData {
+    std::vector<ConsoleFontInfo> fonts;
+};
+
+BOOL CALLBACK EnumFontFamExProc(
+    _In_      ENUMLOGFONTEX *lpelfe,
+    _In_      NEWTEXTMETRICEX *lpntme,
+    _In_      DWORD FontType,
+    _In_      LPARAM lParam
+);
 
 #pragma region  Lua
 
@@ -22,27 +33,22 @@ int lua_set_status_message(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
 
-    // Check arguments: expects (string message)
     if (!lua_isstring(L, 1)) {
         return luaL_error(L, "Argument #1 (message) for set_status_message must be a string.");
     }
     std::string message = lua_tostring(L, 1);
 
-    // Optional: a duration can be passed as a second argument (as discussed previously)
-    ULONGLONG duration_ms = 5000; // Default 5 seconds, match original logic
+    ULONGLONG duration_ms = 5000;
     if (lua_isinteger(L, 2)) {
         duration_ms = lua_tointeger(L, 2);
     }
 
     editor->statusMessage = message;
-    // Set expiry time based on current tick count + duration
     editor->statusMessageTime = GetTickCount64() + duration_ms;
-    return 0; // Number of return values on the Lua stack
+    return 0;
 }
 
 int lua_get_current_time_ms(lua_State* L) {
-    // GetTickCount64() is a Windows-specific function.
-    // If you plan cross-platform, you'd use a C++ standard library chrono function.
     lua_pushinteger(L, GetTickCount64());
     return 1;
 }
@@ -50,8 +56,6 @@ int lua_get_current_time_ms(lua_State* L) {
 int lua_refresh_screen(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
-
-    // Call the main screen refresh logic
     editor->refreshScreen();
     return 0;
 }
@@ -60,14 +64,11 @@ int lua_insert_text(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
 
-    // Check arguments: expects (string text)
     if (!lua_isstring(L, 1)) {
         return luaL_error(L, "Argument #1 (text) for insert_text must be a string.");
     }
     std::string text = lua_tostring(L, 1);
 
-    // Call the Editor's internal method to insert characters
-    // This loops through chars, handling newlines and tab expansion correctly.
     for (char c : text) {
         if (c == '\n') {
             editor->insertNewline();
@@ -75,10 +76,10 @@ int lua_insert_text(lua_State* L) {
             editor->insertChar(c);
         }
     }
-    editor->dirty = true; // Mark buffer as modified
-    editor->calculateLineNumberWidth(); // Recalculate if lines added/removed
-    editor->triggerEvent("on_buffer_changed"); // Notify plugins of buffer change
-    editor->triggerEvent("on_cursor_moved");   // Notify plugins of cursor movement
+    editor->dirty = true;
+    editor->calculateLineNumberWidth();
+    editor->triggerEvent("on_buffer_changed");
+    editor->triggerEvent("on_cursor_moved");
     return 0;
 }
 
@@ -87,12 +88,11 @@ int lua_get_current_line_text(lua_State* L) {
     if (!editor) return luaL_error(L, "Editor instance not found.");
 
     std::string line_text = "";
-    // Ensure cursorY is within valid bounds before accessing `lines` vector
     if (editor->cursorY >= 0 && editor->cursorY < editor->lines.size()) {
         line_text = editor->lines[editor->cursorY];
     }
     lua_pushstring(L, line_text.c_str());
-    return 1; // Return 1 value (the string)
+    return 1;
 }
 
 int lua_get_line_count(lua_State* L) {
@@ -112,7 +112,7 @@ int lua_get_cursor_y(lua_State* L) {
 int lua_force_full_redraw(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
-    editor->force_full_redraw_internal(); // Call the Editor's member function
+    editor->force_full_redraw_internal();
     return 0;
 }
 
@@ -128,11 +128,11 @@ int lua_get_line(lua_State* L) {
     if (!editor) return luaL_error(L, "Editor instance not found.");
     if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
 
-    int line_num = lua_tointeger(L, 1) - 1; // Lua is 1-based, C++ is 0-based
+    int line_num = lua_tointeger(L, 1) - 1;
     if (line_num >= 0 && line_num < editor->lines.size()) {
         lua_pushstring(L, editor->lines[line_num].c_str());
     } else {
-        lua_pushstring(L, ""); // Return empty string for out-of-bounds lines
+        lua_pushstring(L, "");
     }
     return 1;
 }
@@ -150,8 +150,8 @@ int lua_set_line(lua_State* L) {
         editor->lines[line_num] = new_text;
         editor->dirty = true;
         editor->calculateLineNumberWidth();
-        editor->force_full_redraw_internal(); // Use the internal method
-        editor->triggerEvent("on_buffer_changed"); // Trigger buffer changed event
+        editor->force_full_redraw_internal();
+        editor->triggerEvent("on_buffer_changed");
     } else {
         return luaL_error(L, "Line number %d is out of bounds.", line_num + 1);
     }
@@ -167,7 +167,7 @@ int lua_insert_line(lua_State* L) {
     int line_num = lua_tointeger(L, 1) - 1;
     std::string text = lua_tostring(L, 2);
 
-    if (line_num >= 0 && line_num <= editor->lines.size()) { // Can insert at end (size())
+    if (line_num >= 0 && line_num <= editor->lines.size()) {
         editor->lines.insert(editor->lines.begin() + line_num, text);
         editor->dirty = true;
         editor->calculateLineNumberWidth();
@@ -186,10 +186,10 @@ int lua_delete_line(lua_State* L) {
 
     int line_num = lua_tointeger(L, 1) - 1;
 
-    if (editor->lines.empty()) return 0; // Nothing to delete
+    if (editor->lines.empty()) return 0;
     if (line_num >= 0 && line_num < editor->lines.size()) {
         editor->lines.erase(editor->lines.begin() + line_num);
-        if (editor->lines.empty()) { // Ensure at least one empty line
+        if (editor->lines.empty()) {
             editor->lines.push_back("");
         }
         editor->dirty = true;
@@ -206,12 +206,12 @@ int lua_get_buffer_content(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
 
-    lua_newtable(L); // Create a new Lua table
+    lua_newtable(L);
     for (int i = 0; i < editor->lines.size(); ++i) {
         lua_pushstring(L, editor->lines[i].c_str());
-        lua_rawseti(L, -2, i + 1); // Set table[i+1] = line_content (Lua is 1-based)
+        lua_rawseti(L, -2, i + 1);
     }
-    return 1; // Return the table
+    return 1;
 }
 
 int lua_set_buffer_content(lua_State* L) {
@@ -220,18 +220,17 @@ int lua_set_buffer_content(lua_State* L) {
     if (!lua_istable(L, 1)) return luaL_error(L, "Argument #1 (content) must be a table of strings.");
 
     editor->lines.clear();
-    int table_len = luaL_len(L, 1); // Get table length
+    int table_len = luaL_len(L, 1);
     for (int i = 1; i <= table_len; ++i) {
-        lua_rawgeti(L, 1, i); // Get table[i]
+        lua_rawgeti(L, 1, i);
         if (lua_isstring(L, -1)) {
             editor->lines.push_back(lua_tostring(L, -1));
         } else {
-            // Handle non-string elements if necessary, e.g., push an empty string
             editor->lines.push_back("");
         }
-        lua_pop(L, 1); // Pop the value
+        lua_pop(L, 1);
     }
-    if (editor->lines.empty()) editor->lines.push_back(""); // Ensure at least one line
+    if (editor->lines.empty()) editor->lines.push_back("");
 
     editor->cursorX = 0;
     editor->cursorY = 0;
@@ -261,7 +260,7 @@ int lua_get_char_at(lua_State* L) {
 }
 
 int lua_get_tab_stop_width(lua_State* L) {
-    lua_pushinteger(L, KILO_TAB_STOP); // KILO_TAB_STOP must be accessible (e.g., in editor.h)
+    lua_pushinteger(L, KILO_TAB_STOP);
     return 1;
 }
 
@@ -273,10 +272,9 @@ int lua_set_cursor_position(lua_State* L) {
     int x = lua_tointeger(L, 1) - 1;
     int y = lua_tointeger(L, 2) - 1;
 
-    // Clamp cursor to valid positions
     if (y < 0) y = 0;
     if (y >= editor->lines.size()) y = editor->lines.size() - 1;
-    if (editor->lines.empty()) { // Handle empty file special case
+    if (editor->lines.empty()) { 
         y = 0; x = 0;
     } else {
         if (x < 0) x = 0;
@@ -285,7 +283,7 @@ int lua_set_cursor_position(lua_State* L) {
 
     editor->cursorX = x;
     editor->cursorY = y;
-    editor->scroll(); // Adjust scroll to make cursor visible
+    editor->scroll();
     return 0;
 }
 
@@ -324,12 +322,9 @@ int lua_get_col_offset(lua_State* L) {
 int lua_center_view_on_cursor(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
-    editor->scroll(); // `scroll` already tries to keep the cursor in view.
-                      // To truly center, you'd calculate target offsets based on cursor.
-                      // For now, `scroll` is sufficient.
+    editor->scroll();
     return 0;
 }
-
 
 int lua_open_file(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
@@ -369,18 +364,15 @@ int lua_set_directory_path(lua_State* L) {
     if (!editor) return luaL_error(L, "Editor instance not found.");
     if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
     std::string path = lua_tostring(L, 1);
-    editor->populateDirectoryEntries(path); // Re-use existing populate logic
-    // Also update internal currentDirPath member if it's not done in populateDirectoryEntries
+    editor->populateDirectoryEntries(path);
     editor->currentDirPath = path;
     return 0;
 }
 
-// Implementing lua_list_directory would involve replicating some of populateDirectoryEntries
-// but returning the result as a Lua table of tables { {name="file", is_dir=true}, ... }
 int lua_list_directory(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
-    std::string path = lua_tostring(L, 1); // Optional: path, else use currentDirPath
+    std::string path = lua_tostring(L, 1);
 
     std::string targetPath = path.empty() ? editor->currentDirPath : path;
 
@@ -389,7 +381,7 @@ int lua_list_directory(lua_State* L) {
     HANDLE hFind = FindFirstFileA((targetPath + "\\*").c_str(), &findFileData);
 
     if (hFind == INVALID_HANDLE_VALUE) {
-        lua_pushnil(L); // Indicate failure
+        lua_pushnil(L);
         lua_pushstring(L, ("Error: Could not list directory '" + targetPath + "'").c_str());
         return 2;
     }
@@ -404,23 +396,22 @@ int lua_list_directory(lua_State* L) {
     } while (FindNextFileA(hFind, &findFileData) != 0);
     FindClose(hFind);
 
-    // Sort entries (optional, but good practice)
     std::sort(entries.begin(), entries.end(), [](const DirEntry& a, const DirEntry& b) {
         if (a.isDirectory && !b.isDirectory) return true;
         if (!a.isDirectory && b.isDirectory) return false;
         return a.name < b.name;
     });
 
-    lua_newtable(L); // Main table to hold directory entries
+    lua_newtable(L);
     for (int i = 0; i < entries.size(); ++i) {
-        lua_newtable(L); // Table for each entry
+        lua_newtable(L);
         lua_pushstring(L, entries[i].name.c_str());
         lua_setfield(L, -2, "name");
         lua_pushboolean(L, entries[i].isDirectory);
         lua_setfield(L, -2, "is_directory");
-        lua_rawseti(L, -2, i + 1); // Add entry table to main table
+        lua_rawseti(L, -2, i + 1);
     }
-    return 1; // Return the table of entries
+    return 1;
 }
 
 int lua_create_file(lua_State* L) {
@@ -488,9 +479,6 @@ int lua_delete_directory(lua_State* L) {
     return 1;
 }
 
-// You'll need to adapt Editor::promptUser to be driven by lua_prompt_user
-// and potentially resume the Lua coroutine/call a Lua callback when input is ready.
-// For now, a simplified non-blocking version:
 int lua_prompt_user(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
@@ -502,37 +490,30 @@ int lua_prompt_user(lua_State* L) {
         default_val = lua_tostring(L, 2);
     }
 
-    // Store the Lua state and potentially a callback for later resumption
-    // This simplified version just sets the mode and assumes C++ event loop will handle
     editor->mode = PROMPT_MODE;
     editor->promptMessage = prompt_msg;
-    editor->searchQuery = default_val; // Reusing searchQuery for user input
+    editor->searchQuery = default_val;
     editor->statusMessage = editor->promptMessage + editor->searchQuery;
     editor->statusMessageTime = GetTickCount64();
     editor->force_full_redraw_internal();
 
-    // This would typically return a temporary value or nil and then rely on a callback
-    // or a C++ side mechanism to push the result to Lua when input is finished.
-    // For a true blocking call (from Lua's perspective), you'd need Lua coroutines.
-    // For now, let's just indicate that the prompt is active.
-    lua_pushboolean(L, true); // Indicate prompt started
+    lua_pushboolean(L, true);
     return 1;
 }
 
-// A helper for showing messages with explicit duration
 int lua_show_message(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
     if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (message) must be a string.");
 
     std::string message = lua_tostring(L, 1);
-    ULONGLONG duration_ms = 5000; // Default 5 seconds
+    ULONGLONG duration_ms = 5000;
     if (lua_isinteger(L, 2)) {
         duration_ms = lua_tointeger(L, 2);
     }
 
     editor->statusMessage = message;
-    editor->statusMessageTime = GetTickCount64() + duration_ms; // Set expiry time
+    editor->statusMessageTime = GetTickCount64() + duration_ms;
     return 0;
 }
 
@@ -542,14 +523,13 @@ int lua_show_error(lua_State* L) {
     if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (error_message) must be a string.");
 
     std::string message = "Error: " + std::string(lua_tostring(L, 1));
-    ULONGLONG duration_ms = 8000; // Default 8 seconds for errors
+    ULONGLONG duration_ms = 8000;
     if (lua_isinteger(L, 2)) {
         duration_ms = lua_tointeger(L, 2);
     }
 
     editor->statusMessage = message;
     editor->statusMessageTime = GetTickCount64() + duration_ms;
-    // Optionally set a different color attribute for error messages in Editor::drawMessageBar()
     return 0;
 }
 
@@ -579,7 +559,6 @@ int lua_toggle_terminal(lua_State* L) {
 }
 
 int lua_path_join(lua_State* L) {
-    // Lua function will take variable number of string arguments
     int n_args = lua_gettop(L);
     if (n_args == 0) {
         lua_pushstring(L, "");
@@ -622,9 +601,7 @@ int lua_execute_command(lua_State* L) {
     if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (command) must be a string.");
     std::string command = lua_tostring(L, 1);
 
-    // This is a very basic execution and won't capture output or handle interactivity.
-    // For proper handling, you'd integrate with your terminal logic or CreateProcessWithToken/ShellExecuteEx
-    int result = system(command.c_str()); // system() blocks and outputs to console
+    int result = system(command.c_str());
     lua_pushinteger(L, result);
     return 1;
 }
@@ -636,10 +613,9 @@ int lua_register_event_handler(lua_State* L) {
     if (!lua_isfunction(L, 2)) return luaL_error(L, "Argument #2 (handler_function) must be a function.");
 
     std::string event_name = lua_tostring(L, 1);
-    lua_pushvalue(L, 2); // Push the function onto the top of the stack
-    int funcRef = luaL_ref(L, LUA_REGISTRYINDEX); // Store a reference to it
+    lua_pushvalue(L, 2);
+    int funcRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
-    // Store with its L_state for correct context when triggering
     if (event_name == "on_key_press") {
         editor->onKeyPressCallbacks.push_back({funcRef, L});
     } else if (event_name == "on_file_opened") {
@@ -653,7 +629,7 @@ int lua_register_event_handler(lua_State* L) {
     } else if (event_name == "on_mode_changed") {
         editor->onModeChangedCallbacks.push_back({funcRef, L});
     } else {
-        luaL_unref(L, LUA_REGISTRYINDEX, funcRef); // Unref if unknown
+        luaL_unref(L, LUA_REGISTRYINDEX, funcRef);
         return luaL_error(L, "Unknown event name: %s", event_name.c_str());
     }
     return 0;
@@ -662,18 +638,10 @@ int lua_register_event_handler(lua_State* L) {
 int lua_is_ctrl_pressed(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
-    // This requires Editor to track Ctrl key state from input polling
     lua_pushboolean(L, editor->ctrl_pressed);
     return 1;
 }
 
-// --- Plugin Data Persistence ---
-// These would typically save/load JSON/INI to a plugin-specific file
-// For simplicity, let's use a dummy implementation for now.
-// A proper implementation would need a mechanism to map 'key' to a filename,
-// and handle serialization/deserialization (e.g., using a Lua JSON library or custom C++ code).
-
-// Dummy storage for plugin data
 static std::map<std::string, std::string> plugin_data_storage; // Use map for simplicity, convert to file IO later
 
 int lua_save_plugin_data(lua_State* L) {
@@ -685,8 +653,6 @@ int lua_save_plugin_data(lua_State* L) {
     std::string key = lua_tostring(L, 1);
     std::string value = lua_tostring(L, 2);
 
-    // In a real scenario, serialize value (e.g., a table) to JSON/string and write to file.
-    // For this dummy, we just store the string.
     plugin_data_storage[key] = value;
     editor->statusMessage = "Plugin data saved for key: " + key;
     editor->statusMessageTime = GetTickCount64();
@@ -701,34 +667,98 @@ int lua_load_plugin_data(lua_State* L) {
 
     std::string key = lua_tostring(L, 1);
     if (plugin_data_storage.count(key)) {
-        // In a real scenario, read from file and deserialize into Lua table/value.
         lua_pushstring(L, plugin_data_storage[key].c_str());
         return 1;
     } else {
-        lua_pushnil(L); // Not found
+        lua_pushnil(L);
         return 1;
     }
 }
 
-// Define the global static map outside any function
-std::map<std::string, std::string> Editor::plugin_data_storage;
+int lua_set_console_font(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
 
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (font_name) must be a string.");
+    if (!lua_isinteger(L, 2)) return luaL_error(L, "Argument #2 (font_size_x) must be an integer.");
+    if (!lua_isinteger(L, 3)) return luaL_error(L, "Argument #3 (font_size_y) must be an integer.");
+
+    ConsoleFontInfo fontInfo;
+    fontInfo.name = lua_tostring(L, 1);
+    fontInfo.fontSizeX = (short)lua_tointeger(L, 2);
+    fontInfo.fontSizeY = (short)lua_tointeger(L, 3);
+
+    bool success = editor->setConsoleFont(fontInfo);
+    lua_pushboolean(L, success);
+    return 1;
+}
+
+int lua_get_current_console_font(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    ConsoleFontInfo fontInfo = editor->getCurrentConsoleFont();
+    lua_pushstring(L, fontInfo.name.c_str());
+    lua_pushinteger(L, fontInfo.fontSizeX);
+    lua_pushinteger(L, fontInfo.fontSizeY);
+    return 3;
+}
+
+BOOL CALLBACK EnumFontFamExProc(
+  _In_      ENUMLOGFONTEX *lpelfe, // This is actually ENUMLOGFONTEXW in wide character builds
+  _In_      NEWTEXTMETRICEX *lpntme,
+  _In_      DWORD FontType,
+  _In_      LPARAM lParam
+) {
+    FontEnumData* data = reinterpret_cast<FontEnumData*>(lParam);
+
+    if ((FontType & TRUETYPE_FONTTYPE) && (lpelfe->elfLogFont.lfPitchAndFamily & FIXED_PITCH)) {
+        if (lpelfe->elfLogFont.lfFaceName[0] != L'@' && lpelfe->elfLogFont.lfFaceName[0] != L'\0') {
+            char buffer[LF_FACESIZE];
+
+            WideCharToMultiByte(CP_ACP, 0, lpelfe->elfLogFont.lfFaceName, -1, buffer, LF_FACESIZE, NULL, NULL);
+            data->fonts.push_back({std::string(buffer), 0, 0}); // Size fields are placeholders
+        }
+    }
+    return TRUE; // Continue enumeration
+}
+
+int lua_get_available_console_fonts(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    std::vector<ConsoleFontInfo> fonts = editor->getAvailableConsoleFonts();
+
+    lua_newtable(L);
+    for (int i = 0; i < fonts.size(); ++i) {
+        lua_pushinteger(L, i + 1);
+        lua_newtable(L);
+        
+        lua_pushstring(L, fonts[i].name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, fonts[i].fontSizeX);
+        lua_setfield(L, -2, "size_x");
+        lua_pushinteger(L, fonts[i].fontSizeY);
+        lua_setfield(L, -2, "size_y");
+
+        lua_settable(L, -3);
+    }
+    return 1;
+}
 
 // Update the `editor_lib` array to include all new functions
 static const luaL_Reg editor_lib[] = {
-    // Existing functions that are now fully implemented or refined
-    {"set_status_message", lua_set_status_message}, // Refined to accept duration
+    {"set_status_message", lua_set_status_message},
     {"get_current_time_ms", lua_get_current_time_ms},
     {"refresh_screen", lua_refresh_screen},
-    {"force_full_redraw", lua_force_full_redraw}, // Now calls Editor::force_full_redraw_internal()
-    {"insert_text", lua_insert_text},             // Refined to use insertChar/insertNewline
+    {"force_full_redraw", lua_force_full_redraw},
+    {"insert_text", lua_insert_text},
     {"get_current_line_text", lua_get_current_line_text},
     {"get_line_count", lua_get_line_count},
-    {"get_cursor_x", lua_get_cursor_x},             // Returns 1-based index
-    {"get_cursor_y", lua_get_cursor_y},             // Returns 1-based index
+    {"get_cursor_x", lua_get_cursor_x},
+    {"get_cursor_y", lua_get_cursor_y},
     {"get_current_filename", lua_get_current_filename},
 
-    // New functions from the expanded API
     {"get_line", lua_get_line},
     {"set_line", lua_set_line},
     {"insert_line", lua_insert_line},
@@ -737,7 +767,7 @@ static const luaL_Reg editor_lib[] = {
     {"set_buffer_content", lua_set_buffer_content},
     {"get_char_at", lua_get_char_at},
     {"get_tab_stop_width", lua_get_tab_stop_width},
-    {"set_cursor_position", lua_set_cursor_position}, // Expects 1-based x, y
+    {"set_cursor_position", lua_set_cursor_position},
     {"set_row_offset", lua_set_row_offset},
     {"set_col_offset", lua_set_col_offset},
     {"get_row_offset", lua_get_row_offset},
@@ -753,7 +783,7 @@ static const luaL_Reg editor_lib[] = {
     {"create_directory", lua_create_directory},
     {"delete_file", lua_delete_file},
     {"delete_directory", lua_delete_directory},
-    {"prompt", lua_prompt_user}, // 'prompt' is a nicer Lua name, initiates prompt mode
+    {"prompt", lua_prompt_user},
     {"show_message", lua_show_message},
     {"show_error", lua_show_error},
     {"get_screen_size", lua_get_screen_size},
@@ -767,7 +797,13 @@ static const luaL_Reg editor_lib[] = {
     {"is_ctrl_pressed", lua_is_ctrl_pressed},
     {"save_plugin_data", lua_save_plugin_data},
     {"load_plugin_data", lua_load_plugin_data},
-    {NULL, NULL}  // Sentinel to mark the end of the array
+
+    // Font Controls
+    {"set_console_font", lua_set_console_font},
+    {"get_current_console_font", lua_get_current_console_font},
+    {"get_available_console_fonts", lua_get_available_console_fonts},
+
+    {NULL, NULL}
 };
 #pragma endregion
 
@@ -799,6 +835,7 @@ Editor::Editor() :
     terminalHeight(0),
     terminalWidth(0),
     hChildStdinRead(NULL), hChildStdinWrite(NULL), hChildStdoutRead(NULL), hChildStdoutWrite(NULL),
+    hConsoleInput(INVALID_HANDLE_VALUE), originalConsoleMode(0),
     currentFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE), // Default white
     currentBgColor(0),
     currentBold(false),
@@ -807,6 +844,27 @@ Editor::Editor() :
 {
     lines.push_back("");
     updateScreenSize();
+    
+    currentFont = getCurrentConsoleFont();
+
+    hConsoleInput = GetStdHandle(STD_INPUT_HANDLE);
+    if (hConsoleInput != INVALID_HANDLE_VALUE) {
+        if (!GetConsoleMode(hConsoleInput, &originalConsoleMode)) {
+            std::cerr << "Error getting console mode: " << GetLastError() << std::endl;
+        }
+        // Set the desired raw input mode for the editor
+        DWORD newMode = originalConsoleMode;
+        newMode &= ~ENABLE_ECHO_INPUT;      // Disable echoing input
+        newMode &= ~ENABLE_LINE_INPUT;      // Disable line buffering (return on any key)
+        newMode &= ~ENABLE_PROCESSED_INPUT; // Disable Ctrl+C, Ctrl+Break system processing
+        // newMode |= ENABLE_VIRTUAL_TERMINAL_INPUT; // Enable if you want to explicitly parse VT100 input sequences
+                                                    // (like arrow keys as ESC[A, ESC[B etc. directly in your input loop)
+                                                    // Your current approach with ReadConsoleInput should work fine without this.
+        if (!SetConsoleMode(hConsoleInput, newMode)) {
+            std::cerr << "Error setting console mode: " << GetLastError() << std::endl;
+        }
+    }
+
     prevDrawnLines.resize(screenRows - 2);
     for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
 
@@ -816,8 +874,13 @@ Editor::Editor() :
 
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
-        defaultFgColor = csbi.wAttributes & 0x0F;
-        defaultBgColor = csbi.wAttributes & 0x0F;
+        defaultFgColor = csbi.wAttributes & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+        defaultBgColor = csbi.wAttributes & (BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY);
+        currentFgColor = defaultFgColor;
+        currentBgColor = defaultBgColor;
+    } else {
+        defaultFgColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; // Default white
+        defaultBgColor = 0; // Default black
         currentFgColor = defaultFgColor;
         currentBgColor = defaultBgColor;
     }
@@ -830,12 +893,20 @@ Editor::Editor() :
 
 Editor::~Editor() {
     finalizeLua();
+
     for (const auto& cb : onKeyPressCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
     for (const auto& cb : onFileOpenedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
     for (const auto& cb : onFileSavedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
     for (const auto& cb : onBufferChangedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
     for (const auto& cb : onCursorMovedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
     for (const auto& cb : onModeChangedCallbacks) luaL_unref(cb.L_state, LUA_REGISTRYINDEX, cb.funcRef);
+
+    if (hConsoleInput != INVALID_HANDLE_VALUE && originalConsoleMode != 0) {
+        if (!SetConsoleMode(hConsoleInput, originalConsoleMode)) {
+            std::cerr << "Error restoring console mode: " << GetLastError() << std::endl;
+        }
+    }
+
     stopTerminal();
 }
 
@@ -843,13 +914,12 @@ void Editor::triggerEvent(const std::string& eventName, int param) {
     std::vector<LuaCallback>* callbacks = nullptr;
     if (eventName == "on_key_press") callbacks = &onKeyPressCallbacks;
     else if (eventName == "on_mode_changed") callbacks = &onModeChangedCallbacks;
-    // ... add more if they take int params
 
     if (callbacks) {
         for (const auto& callback : *callbacks) {
             lua_rawgeti(callback.L_state, LUA_REGISTRYINDEX, callback.funcRef);
             lua_pushinteger(callback.L_state, param);
-            int status = lua_pcall(callback.L_state, 1, 0, 0); // 1 arg, 0 results
+            int status = lua_pcall(callback.L_state, 1, 0, 0);
             if (status != LUA_OK) {
                 std::cerr << "Error in Lua event '" << eventName << "': " << lua_tostring(callback.L_state, -1) << std::endl;
                 lua_pop(callback.L_state, 1);
@@ -862,13 +932,12 @@ void Editor::triggerEvent(const std::string& eventName, const std::string& param
     std::vector<LuaCallback>* callbacks = nullptr;
     if (eventName == "on_file_opened") callbacks = &onFileOpenedCallbacks;
     else if (eventName == "on_file_saved") callbacks = &onFileSavedCallbacks;
-    // ... add more if they take string params
 
     if (callbacks) {
         for (const auto& callback : *callbacks) {
             lua_rawgeti(callback.L_state, LUA_REGISTRYINDEX, callback.funcRef);
             lua_pushstring(callback.L_state, param.c_str());
-            int status = lua_pcall(callback.L_state, 1, 0, 0); // 1 arg, 0 results
+            int status = lua_pcall(callback.L_state, 1, 0, 0);
             if (status != LUA_OK) {
                 std::cerr << "Error in Lua event '" << eventName << "': " << lua_tostring(callback.L_state, -1) << std::endl;
                 lua_pop(callback.L_state, 1);
@@ -878,15 +947,14 @@ void Editor::triggerEvent(const std::string& eventName, const std::string& param
 }
 
 void Editor::initializeLua() {
-    L = luaL_newstate(); // Create new Lua state
+    L = luaL_newstate();
     if (!L) {
         std::cerr << "Error: Failed to create Lua state." << std::endl;
         exit(1);
     }
 
-    luaL_openlibs(L); // Open all standard Lua libraries (base, table, io, string, math, debug etc.)
+    luaL_openlibs(L);
 
-    // Expose Editor API to Lua
     exposeEditorToLua();
 
     statusMessage = "Lua interpreter initialized.";
@@ -895,7 +963,7 @@ void Editor::initializeLua() {
 
 void Editor::finalizeLua() {
     if (L) {
-        lua_close(L); // Close Lua state, cleans up everything
+        lua_close(L);
         L = nullptr;
     }
     statusMessage = "Lua interpreter finalized.";
@@ -903,36 +971,23 @@ void Editor::finalizeLua() {
 }
 
 void Editor::exposeEditorToLua() {
-    // Create a new table (like a Python module)
     lua_newtable(L);
-    int editor_api_table_idx = lua_gettop(L); // Get its index on the stack
-
-    // Push the 'this' pointer to Editor onto the stack as userdata.
-    // This userdata will be used as an 'upvalue' for all functions in editor_lib.
-    lua_pushlightuserdata(L, this); // 'light' means Lua doesn't manage its memory
-
-    // Register all C functions in editor_lib into the new table
-    // For each function in editor_lib, lua_pushcclosure pushes the C function
-    // along with 1 upvalue (the Editor* userdata)
+    lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, editor_lib, 1);
-
-    // Set the table as a global variable named 'editor_api'
     lua_setglobal(L, "editor_api");
 
-    // Add plugin directory to Lua's package.path
     lua_getglobal(L, "package");
-    lua_getfield(L, -1, "path"); // Get package.path
+    lua_getfield(L, -1, "path");
     std::string current_path = lua_tostring(L, -1);
-    current_path += ";./plugins/?.lua"; // Add plugins dir relative to executable
-    lua_pop(L, 1); // Pop old path
+    current_path += ";./plugins/?.lua";
+    lua_pop(L, 1);
     lua_pushstring(L, current_path.c_str());
-    lua_setfield(L, -2, "path"); // Set new path
-    lua_pop(L, 1); // Pop package table
+    lua_setfield(L, -2, "path");
+    lua_pop(L, 1);
 
-    // Check for errors
     if (lua_status(L) != LUA_OK) {
         std::cerr << "Error exposing Editor to Lua: " << lua_tostring(L, -1) << std::endl;
-        lua_pop(L, 1); // Pop error message
+        lua_pop(L, 1);
     }
 }
 
@@ -945,7 +1000,7 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
     statusMessage = "Loading Lua plugins from '" + pluginDir + "'...";
     statusMessageTime = GetTickCount64();
 
-    CreateDirectoryA(pluginDir.c_str(), NULL); // Ensure plugins directory exists
+    CreateDirectoryA(pluginDir.c_str(), NULL);
 
     WIN32_FIND_DATAA findFileData;
     HANDLE hFind = FindFirstFileA((pluginDir + "\\*.lua").c_str(), &findFileData);
@@ -962,11 +1017,10 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
 
         std::string luaFilePath = pluginDir + "\\" + luaFileName;
 
-        // Load and execute the Lua script
         int status = luaL_dofile(L, luaFilePath.c_str());
         if (status != LUA_OK) {
             std::string error_msg = lua_tostring(L, -1);
-            lua_pop(L, 1); // Pop error message
+            lua_pop(L, 1);
             statusMessage = "Error loading Lua plugin '" + luaFileName + "': " + error_msg;
             statusMessageTime = GetTickCount64();
             std::cerr << "Lua Error: " << error_msg << std::endl;
@@ -974,11 +1028,9 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
             statusMessage = "Loaded Lua plugin: " + luaFileName;
             statusMessageTime = GetTickCount64();
 
-            // Optional: Call an 'on_load' function in the plugin if it exists
-            lua_getglobal(L, "on_load"); // Try to get a global 'on_load' function from the plugin
+            lua_getglobal(L, "on_load");
             if (lua_isfunction(L, -1)) {
-                // Call it (no arguments)
-                status = lua_pcall(L, 0, 0, 0); // 0 args, 0 results, 0 error func
+                status = lua_pcall(L, 0, 0, 0);
                 if (status != LUA_OK) {
                     std::string error_msg = lua_tostring(L, -1);
                     lua_pop(L, 1);
@@ -987,7 +1039,7 @@ void Editor::loadLuaPlugins(const std::string& pluginDir) {
                     std::cerr << "Lua on_load Error: " << error_msg << std::endl;
                 }
             } else {
-                lua_pop(L, 1); // Pop nil if on_load not found
+                lua_pop(L, 1);
             }
         }
     } while (FindNextFileA(hFind, &findFileData) != 0);
@@ -1004,29 +1056,20 @@ bool Editor::executeLuaPluginCommand(const std::string& pluginName, const std::s
         return false;
     }
     
-    // Attempt to get the function from the global scope (assuming plugins define global functions)
-    // Or if plugins create a table/module, you'd do:
-    // lua_getglobal(L, pluginName.c_str());
-    // if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; } // Not a table
-    // lua_getfield(L, -1, commandName.c_str());
-    // lua_remove(L, -2); // Pop the table
-    
-    // For simplicity, let's assume `commandName` is a global function directly
-    lua_getglobal(L, commandName.c_str()); // Push function onto stack
+    lua_getglobal(L, commandName.c_str());
 
     if (!lua_isfunction(L, -1)) {
         std::string type_name = lua_typename(L, lua_type(L, -1));
-        lua_pop(L, 1); // Pop non-function value
+        lua_pop(L, 1);
         statusMessage = "Command '" + commandName + "' not found or not a function in Lua. Type was: " + type_name;
         statusMessageTime = GetTickCount64();
         return false;
     }
 
-    // Call the Lua function (0 args, 0 results, 0 error handler)
     int status = lua_pcall(L, 0, 0, 0);
     if (status != LUA_OK) {
         std::string error_msg = lua_tostring(L, -1);
-        lua_pop(L, 1); // Pop error message
+        lua_pop(L, 1);
         statusMessage = "Error executing Lua command '" + commandName + "': " + error_msg;
         statusMessageTime = GetTickCount64();
         std::cerr << "Lua Command Error: " << error_msg << std::endl;
@@ -1057,7 +1100,7 @@ void Editor::calculateLineNumberWidth()
 
 void Editor::updateScreenSize() {
     CONSOLE_SCREEN_BUFFER_INFO csbi;
-    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi); // Use GetStdHandle locally
+    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
     int newScreenRows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
     int newScreenCols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 
@@ -1067,17 +1110,15 @@ void Editor::updateScreenSize() {
         screenCols = newScreenCols;
         calculateLineNumberWidth();
 
+        // prevDrawnLines resized to cover the content area (screenRows - 2 lines)
         prevDrawnLines.resize(screenRows - 2);
         for (auto& s : prevDrawnLines)
         {
-            if (s.length() != screenCols)
-            {
-                s.assign(screenCols, ' ');
-            }
+            s.assign(screenCols, ' ');
         }
-        clearScreen();
-        prevStatusMessage = "";
-        prevMessageBarMessage = "";
+        // No clearScreen() here, refreshScreen's mode check will handle it.
+        // But do force a redraw because screen size changed.
+        force_full_redraw_internal();
     }
 }
 
@@ -1098,33 +1139,27 @@ void Editor::drawScreenContent() {
         return;
     }
 
-    // This is the effective drawing width for text content after line numbers
     int effectiveScreenCols = screenCols - lineNumberWidth;
 
-    for (int i = 0; i < screenRows - 2; ++i) { // Iterate through each visible screen row for content
+    for (int i = 0; i < screenRows - 2; ++i) {
         int fileRow = rowOffset + i;
-        std::string fullLineContentToDraw = ""; // The full string content of the screen line (chars)
-        std::vector<WORD> fullLineAttributes(screenCols); // Attributes for each char on the screen line
+        std::string fullLineContentToDraw = "";
+        std::vector<WORD> fullLineAttributes(screenCols);
 
-        // --- 1. Prepare Line Number Part ---
         std::string lineNumberStr;
         std::ostringstream ss_lineNumber;
-        if (fileRow >= 0 && fileRow < lines.size()) { // Check bounds for actual lines
+        if (fileRow >= 0 && fileRow < lines.size()) {
             ss_lineNumber << std::setw(lineNumberWidth - 1) << (fileRow + 1) << " ";
         } else {
-            // For lines beyond file content (like ~ in Vim)
             ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~";
         }
         lineNumberStr = ss_lineNumber.str();
         fullLineContentToDraw += lineNumberStr;
 
-        // Set attributes for the line number part
         for (int k = 0; k < lineNumberStr.length(); ++k) {
-            fullLineAttributes[k] = defaultFgColor | defaultBgColor; // Default text color for line numbers
+            fullLineAttributes[k] = defaultFgColor | defaultBgColor;
         }
 
-
-        // --- 2. Prepare Rendered Text Content Part ---
         std::string renderedTextContent = "";
         if (fileRow >= 0 && fileRow < lines.size()) {
             std::string fullRenderedLine = getRenderedLine(fileRow);
@@ -1132,7 +1167,6 @@ void Editor::drawScreenContent() {
             int startCharInRenderedLine = colOffset;
             int endCharInRenderedLine = colOffset + effectiveScreenCols;
 
-            // Clamp the substring indices to valid range
             startCharInRenderedLine = std::max(0, startCharInRenderedLine);
             startCharInRenderedLine = std::min(startCharInRenderedLine, (int)fullRenderedLine.length());
             endCharInRenderedLine = std::max(0, endCharInRenderedLine);
@@ -1144,93 +1178,73 @@ void Editor::drawScreenContent() {
         }
         fullLineContentToDraw += renderedTextContent;
 
-        // Set attributes for the main text content, including search highlighting
-        int currentScreenCol = lineNumberStr.length(); // Start after line numbers
+        int currentScreenCol = lineNumberStr.length();
         for (int k = 0; k < renderedTextContent.length(); ++k) {
-            WORD current_attributes = defaultFgColor | defaultBgColor; // Base text color
+            WORD current_attributes = defaultFgColor | defaultBgColor;
             bool isHighlight = false;
 
-            // Check if current character is part of the highlighted search result
             if (!searchQuery.empty() && currentMatchIndex != -1 && fileRow == searchResults[currentMatchIndex].first) {
-                // Convert search result's character index (in logical line) to its rendered/visual index
                 int matchLogicalStart = searchResults[currentMatchIndex].second;
                 int matchLogicalEnd = searchResults[currentMatchIndex].second + searchQuery.length();
 
-                // Get rendered positions of match in the *full* rendered line (not just visible part)
                 int matchRenderedStart = cxToRx(fileRow, matchLogicalStart);
                 int matchRenderedEnd = cxToRx(fileRow, matchLogicalEnd);
 
-                // Calculate the character's *global rendered position* on the line being drawn
-                // This is (currentScreenCol - lineNumberStr.length()) + colOffset (where colOffset is the scroll)
                 int charGlobalRenderedPos = (currentScreenCol + k) - lineNumberStr.length() + colOffset;
 
-                // If this character's global rendered position falls within the highlighted match's rendered range
                 if (charGlobalRenderedPos >= matchRenderedStart && charGlobalRenderedPos < matchRenderedEnd) {
                     isHighlight = true;
                 }
             }
 
             if (isHighlight) {
-                current_attributes = BG_YELLOW | BLACK; // Highlight: Black text on Yellow background
+                current_attributes = BG_YELLOW | BLACK;
             }
             fullLineAttributes[currentScreenCol + k] = current_attributes;
         }
 
-        // --- 3. Pad the rest of the line with spaces and default attributes ---
         for (int k = fullLineContentToDraw.length(); k < screenCols; ++k) {
             fullLineContentToDraw += ' ';
             fullLineAttributes[k] = defaultFgColor | defaultBgColor;
         }
 
-
-        // --- 4. Perform Diff and Draw Only if Necessary ---
-        // Compare the *full* line string (including padding) with the previously drawn line
-        // We ensure prevDrawnLines is appropriately sized by updateScreenSize()
         if (i >= prevDrawnLines.size() || prevDrawnLines[i] != fullLineContentToDraw) {
-            COORD writePos = { 0, (SHORT)i }; // Position to start writing on the console buffer
+            COORD writePos = { 0, (SHORT)i };
             DWORD charsWritten;
 
-            // Write characters to the console
             if (!WriteConsoleOutputCharacterA(hConsole, fullLineContentToDraw.c_str(), screenCols, writePos, &charsWritten)) {
                 std::cerr << "WriteConsoleOutputCharacterA failed: " << GetLastError() << std::endl;
             }
 
-            // Write attributes to the console
             if (!WriteConsoleOutputAttribute(hConsole, fullLineAttributes.data(), screenCols, writePos, &charsWritten)) {
                 std::cerr << "WriteConsoleOutputAttribute failed: " << GetLastError() << std::endl;
             }
 
-            // Update the cached line for the next diff cycle
             if (i < prevDrawnLines.size()) {
                 prevDrawnLines[i] = fullLineContentToDraw;
             }
         }
     }
 
-    // Status and message bars are drawn separately (and more simply, so they can use direct calls)
     drawStatusBar();
     drawMessageBar();
 }
 
 void Editor::startSearch() {
-    originalCursorX = cursorX; // Save original cursor position
+    originalCursorX = cursorX;
     originalCursorY = cursorY;
     originalRowOffset = rowOffset;
     originalColOffset = colOffset;
 
     mode = PROMPT_MODE;
     promptMessage = "Search: ";
-    searchQuery = ""; // Clear previous search query
-    searchResults.clear(); // Clear previous results
-    currentMatchIndex = -1; // No match selected yet
+    searchQuery = "";
+    searchResults.clear();
+    currentMatchIndex = -1;
     statusMessage = "Enter search term. ESC to cancel, Enter to search.";
     statusMessageTime = GetTickCount64();
 
-    // Invalidate prevDrawnLines to ensure prompt is drawn fresh
-    for(auto& s : prevDrawnLines) s.assign(screenCols, ' ');
-    prevStatusMessage = "";
-    prevMessageBarMessage = "";
-    clearScreen(); // Force full screen redraw to show prompt cleanly
+    force_full_redraw_internal(); // Invalidate cache for new mode's content
 }
 
 void Editor::performSearch() {
@@ -1240,62 +1254,59 @@ void Editor::performSearch() {
     if (searchQuery.empty()) {
         statusMessage = "Search cancelled or empty.";
         statusMessageTime = GetTickCount64();
-        mode = EDIT_MODE; // Exit search mode if query is empty
-        cursorX = originalCursorX; // Restore cursor
+        mode = EDIT_MODE;
+        cursorX = originalCursorX;
         cursorY = originalCursorY;
-        rowOffset = originalRowOffset; // Restore scroll
+        rowOffset = originalRowOffset;
         colOffset = originalColOffset;
+        force_full_redraw_internal(); // Revert to previous state, full redraw needed
         return;
     }
 
-    // Iterate through lines to find all matches
     for (int r = 0; r < lines.size(); ++r) {
         size_t pos = lines[r].find(searchQuery, 0);
         while (pos != std::string::npos) {
             searchResults.push_back({r, (int)pos});
-            pos = lines[r].find(searchQuery, pos + 1); // Find next occurrence after current match
+            pos = lines[r].find(searchQuery, pos + 1);
         }
     }
 
     if (searchResults.empty()) {
         statusMessage = "No matches found for '" + searchQuery + "'";
         statusMessageTime = GetTickCount64();
-        mode = EDIT_MODE; // No matches, go back to edit mode
-        cursorX = originalCursorX; // Restore cursor
+        mode = EDIT_MODE;
+        cursorX = originalCursorX;
         cursorY = originalCursorY;
-        rowOffset = originalRowOffset; // Restore scroll
+        rowOffset = originalRowOffset;
         colOffset = originalColOffset;
+        force_full_redraw_internal(); // Revert to previous state, full redraw needed
         return;
     }
 
-    // Found matches. Go to the first one.
     currentMatchIndex = 0;
     statusMessage = "Found " + std::to_string(searchResults.size()) + " matches. (N)ext (P)rev";
     statusMessageTime = GetTickCount64();
 
-    // Move cursor and scroll to the first match
     cursorY = searchResults[currentMatchIndex].first;
     cursorX = searchResults[currentMatchIndex].second;
-    
-    // Adjust scroll to make sure the found match is visible
-    scroll(); // This should adjust rowOffset/colOffset
+    scroll();
     
     mode = EDIT_MODE; // Exit search prompt mode
+    force_full_redraw_internal();
 }
-
 
 void Editor::findNext() {
     if (searchResults.empty()) return;
 
     currentMatchIndex = (currentMatchIndex + 1) % searchResults.size();
 
-    // Move cursor and scroll to the new match
     cursorY = searchResults[currentMatchIndex].first;
     cursorX = searchResults[currentMatchIndex].second;
-    scroll(); // Adjust scroll
+    scroll();
 
     statusMessage = "Match " + std::to_string(currentMatchIndex + 1) + " of " + std::to_string(searchResults.size());
     statusMessageTime = GetTickCount64();
+    force_full_redraw_internal();
 }
 
 void Editor::findPrevious() {
@@ -1312,22 +1323,25 @@ void Editor::findPrevious() {
 
     statusMessage = "Match " + std::to_string(currentMatchIndex + 1) + " of " + std::to_string(searchResults.size());
     statusMessageTime = GetTickCount64();
+    force_full_redraw_internal();
 }
 
 bool Editor::promptUser(const std::string& prompt, int input_c, std::string& result) {
     if (input_c == 13) { // Enter
-        mode = EDIT_MODE; // Exit prompt mode
-        return true; // Success
+        mode = EDIT_MODE;
+        force_full_redraw_internal(); // Back to edit mode, redraw content
+        return true;
     } else if (input_c == 27) { // Escape
-        mode = EDIT_MODE; // Exit prompt mode
-        result.clear(); // Clear the input
+        mode = EDIT_MODE;
+        result.clear();
         statusMessage = "Operation cancelled.";
         statusMessageTime = GetTickCount64();
-        cursorX = originalCursorX; // Restore cursor
+        cursorX = originalCursorX;
         cursorY = originalCursorY;
-        rowOffset = originalRowOffset; // Restore scroll
+        rowOffset = originalRowOffset;
         colOffset = originalColOffset;
-        return false; // Cancelled
+        force_full_redraw_internal(); // Restore original state, redraw content
+        return false;
     } else if (input_c == 8) { // Backspace
         if (!result.empty()) {
             result.pop_back();
@@ -1335,14 +1349,11 @@ bool Editor::promptUser(const std::string& prompt, int input_c, std::string& res
     } else if (input_c >= 32 && input_c <= 126) { // Printable characters
         result += static_cast<char>(input_c);
     }
-    // Update the message bar with the current prompt and input
     statusMessage = prompt + result;
-    statusMessageTime = GetTickCount64(); // Keep message alive while typing
-
-    // Return false to indicate prompt mode is still active
+    statusMessageTime = GetTickCount64() + 5000; // Keep message alive while typing, but not indefinitely
+                                                 // (it's updated on every char, so this is fine)
     return false;
 }
-
 void Editor::drawStatusBar() {
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hConsole == INVALID_HANDLE_VALUE) return;
@@ -1380,48 +1391,67 @@ void Editor::drawStatusBar() {
 }
 
 void Editor::drawMessageBar() {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) return;
+
     std::string currentMessage = "";
     ULONGLONG currentTime = GetTickCount64();
-    if (currentTime - statusMessageTime < 5000) { // Display for 5 seconds
+    if (currentTime < statusMessageTime) {
         currentMessage = trimRight(statusMessage);
     }
-    currentMessage += std::string(screenCols - currentMessage.length(), ' ');
+    
+    if (currentMessage.length() < screenCols) {
+        currentMessage += std::string(screenCols - currentMessage.length(), ' ');
+    } else if (currentMessage.length() > screenCols) {
+        currentMessage = currentMessage.substr(0, screenCols);
+    }
 
-    // --- Only redraw if message bar content has changed ---
     if (currentMessage != prevMessageBarMessage) {
-        setCursorPosition(0, screenRows - 1); // Last row
-        setTextColor(YELLOW | INTENSITY);
-        writeStringAt(0, screenRows - 1, currentMessage);
+        std::vector<WORD> attributes(screenCols);
+        for (int k = 0; k < screenCols; ++k) {
+            attributes[k] = YELLOW | INTENSITY | defaultBgColor;
+        }
+
+        COORD writePos = {0, (SHORT)(screenRows - 1)};
+        DWORD charsWritten;
+
+        WriteConsoleOutputCharacterA(hConsole, currentMessage.c_str(), screenCols, writePos, &charsWritten);
+        WriteConsoleOutputAttribute(hConsole, attributes.data(), screenCols, writePos, &charsWritten);
+
         prevMessageBarMessage = currentMessage;
     }
 }
 
-// Helper to trim trailing spaces (useful for status message display)
 std::string Editor::trimRight(const std::string& s) {
     size_t end = s.find_last_not_of(" \t\n\r\f\v");
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
 }
 
 void Editor::scroll() {
+    bool scrolledVertically = false;
+    bool scrolledHorizontally = false;
+
     if (cursorY < rowOffset) {
         rowOffset = cursorY;
-        force_full_redraw_internal();
-    }
-    if (cursorY >= rowOffset + screenRows - 2) {
+        scrolledVertically = true;
+    } else if (cursorY >= rowOffset + (screenRows - 2)) {
         rowOffset = cursorY - (screenRows - 2) + 1;
-        force_full_redraw_internal();
+        scrolledVertically = true;
     }
 
-    int renderedCursorX = cxToRx(cursorY, cursorX); // Get visual position of cursor
+    int renderedCursorX = cxToRx(cursorY, cursorX);
     int effectiveColsForText = screenCols - lineNumberWidth;
 
     if (renderedCursorX < colOffset) {
         colOffset = renderedCursorX;
-        force_full_redraw_internal();
-    }
-    if (renderedCursorX >= colOffset + effectiveColsForText) {
+        scrolledHorizontally = true;
+    } else if (renderedCursorX >= colOffset + effectiveColsForText) {
         colOffset = renderedCursorX - effectiveColsForText + 1;
-        force_full_redraw_internal();
+        scrolledHorizontally = true;
+    }
+
+    if (scrolledVertically || scrolledHorizontally) {
+        force_full_redraw_internal(); // Only invalidate cache, not clear screen
     }
 }
 
@@ -1524,7 +1554,7 @@ void Editor::insertChar(int c) {
     lines[cursorY].insert(cursorX, 1, static_cast<char>(c));
     cursorX++;
     statusMessage = "";
-    statusMessageTime = 0; // Clear immediately
+    statusMessageTime = 0;
     calculateLineNumberWidth();
     dirty = true;
 }
@@ -1546,7 +1576,7 @@ void Editor::insertNewline() {
     dirty = true;
 }
 
-void Editor::deleteChar() { // Backspace
+void Editor::deleteChar() {
     if (cursorY == lines.size()) return;
     if (cursorX == 0 && cursorY == 0 && lines[0].empty()) {
         return;
@@ -1568,7 +1598,7 @@ void Editor::deleteChar() { // Backspace
     dirty = true;
 }
 
-void Editor::deleteForwardChar() { // Delete key
+void Editor::deleteForwardChar() {
     if (cursorY == lines.size()) return;
     if (cursorX == lines[cursorY].length() && cursorY == lines.size() - 1) {
         return;
@@ -1586,7 +1616,6 @@ void Editor::deleteForwardChar() { // Delete key
     statusMessageTime = 0;
     dirty = true;
 }
-
 
 bool Editor::openFile(const std::string& path) {
     std::ifstream file(path);
@@ -1616,10 +1645,7 @@ bool Editor::openFile(const std::string& path) {
     statusMessage = "Opened '" + path + "'";
     statusMessageTime = GetTickCount64();
 
-    // Force a full redraw after file open
-    for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
-    prevStatusMessage = "";
-    prevMessageBarMessage = "";
+    force_full_redraw_internal(); // Force a full redraw after file open
 
     dirty = false;
     return true;
@@ -1641,7 +1667,7 @@ bool Editor::saveFile() {
     }
 
     for (const auto& line : lines) {
-        file << line << "\r\n"; // Windows line endings (CRLF)
+        file << line << "\r\n";
     }
     file.close();
 
@@ -1711,32 +1737,29 @@ void Editor::toggleFileExplorer() {
         mode = FILE_EXPLORER_MODE;
         statusMessage = "File Explorer Mode: Navigate with arrows, Enter to open/CD, N for New, D for Delete.";
         statusMessageTime = GetTickCount64();
-        populateDirectoryEntries(currentDirPath); // Populate entries when entering mode
-        selectedFileIndex = 0; // Reset selection
-        fileExplorerScrollOffset = 0; // Reset scroll
-        clearScreen(); // Force full redraw when changing modes
-        for (auto& s : prevDrawnLines) s.assign(screenCols, ' '); // Invalidate text editor view
+        populateDirectoryEntries(currentDirPath);
+        selectedFileIndex = 0;
+        fileExplorerScrollOffset = 0;
+        // No clearScreen here, refreshScreen handles it on mode change.
+        force_full_redraw_internal();
     }
     else { // FILE_EXPLORER_MODE
         mode = EDIT_MODE;
         statusMessage = "Edit Mode: Ctrl-Q = quit | Ctrl-S = save | Ctrl-O = open | Ctrl-E = explorer";
         statusMessageTime = GetTickCount64();
-        directoryEntries.clear(); // Clear entries when exiting
-        clearScreen(); // Force full redraw when changing modes
-        for (auto& s : prevDrawnLines) s.assign(screenCols, ' '); // Invalidate text editor view
+        directoryEntries.clear();
+        // No clearScreen here, refreshScreen handles it on mode change.
+        force_full_redraw_internal();
     }
-    prevStatusMessage = ""; // Force status bar redraw
-    prevMessageBarMessage = ""; // Force message bar redraw
 }
 
 void Editor::populateDirectoryEntries(const std::string& path) {
     directoryEntries.clear();
 
-    // Add ".." entry for navigating up
     directoryEntries.push_back({ "..", true });
 
-    WIN32_FIND_DATAA findFileData; // Using A for ANSI string
-    HANDLE hFind = FindFirstFileA((path + "\\*").c_str(), &findFileData); // Find files and directories
+    WIN32_FIND_DATAA findFileData;
+    HANDLE hFind = FindFirstFileA((path + "\\*").c_str(), &findFileData);
 
     if (hFind == INVALID_HANDLE_VALUE) {
         statusMessage = "Error: Could not list directory '" + path + "'";
@@ -1746,7 +1769,6 @@ void Editor::populateDirectoryEntries(const std::string& path) {
 
     do {
         std::string entryName = findFileData.cFileName;
-        // Skip "." and ".." as we handle ".." explicitly
         if (entryName == "." || entryName == "..") {
             continue;
         }
@@ -1758,23 +1780,24 @@ void Editor::populateDirectoryEntries(const std::string& path) {
 
     FindClose(hFind);
 
-    // Sort entries: directories first, then files, both alphabetically
     std::sort(directoryEntries.begin() + 1, directoryEntries.end(), [](const DirEntry& a, const DirEntry& b) {
         if (a.isDirectory && !b.isDirectory) return true;
         if (!a.isDirectory && b.isDirectory) return false;
         return a.name < b.name;
-        });
+    });
 
-    currentDirPath = path; // Update current path
+    currentDirPath = path;
     statusMessage = "Viewing: " + currentDirPath;
     statusMessageTime = GetTickCount64();
+
+    force_full_redraw_internal(); // The content of the explorer has changed
 }
 
 void Editor::moveFileExplorerSelection(int key) {
     if (directoryEntries.empty()) return;
 
     int oldSelectedFileIndex = selectedFileIndex;
-    int oldFileExplorerScrollOffset = fileExplorerScrollOffset; // Capture old scroll for potential diffing
+    int oldFileExplorerScrollOffset = fileExplorerScrollOffset;
 
     if (key == ARROW_UP) {
         selectedFileIndex = std::max(0, selectedFileIndex - 1);
@@ -1795,7 +1818,6 @@ void Editor::moveFileExplorerSelection(int key) {
         selectedFileIndex = directoryEntries.size() - 1;
     }
 
-    // Adjust scroll offset
     if (selectedFileIndex < fileExplorerScrollOffset) {
         fileExplorerScrollOffset = selectedFileIndex;
     }
@@ -1804,13 +1826,17 @@ void Editor::moveFileExplorerSelection(int key) {
     }
 
     if (oldSelectedFileIndex != selectedFileIndex || oldFileExplorerScrollOffset != fileExplorerScrollOffset) {
-        force_full_redraw_internal(); // This now just invalidates the cache, doesn't clear screen
+        // No clearScreen here. drawFileExplorer will handle partial redraw.
+        // But need to ensure refreshScreen is called (which it is, by main loop)
+        // and that previous lines for status/message are invalidated.
+        prevStatusMessage = ""; // Force status bar redraw
+        prevMessageBarMessage = ""; // Force message bar redraw
     }
 }
 
 void Editor::handleFileExplorerEnter() {
     if (directoryEntries.empty() || selectedFileIndex < 0 || selectedFileIndex >= directoryEntries.size()) {
-        return; // Nothing selected
+        return;
     }
 
     DirEntry& selectedEntry = directoryEntries[selectedFileIndex];
@@ -1824,16 +1850,14 @@ void Editor::handleFileExplorerEnter() {
     std::string newPath = newPathBuffer;
 
     if (selectedEntry.isDirectory) {
-        // Change directory
-        populateDirectoryEntries(newPath);
-        selectedFileIndex = 0; // Reset selection in new directory
+        populateDirectoryEntries(newPath); // This function now calls force_full_redraw_internal()
+        selectedFileIndex = 0;
         fileExplorerScrollOffset = 0;
-        clearScreen(); // Full refresh after CD
+        // No clearScreen() here, populateDirectoryEntries and refreshScreen handles it.
     }
     else {
-        // Open file in editor mode
-        openFile(newPath);
-        toggleFileExplorer(); // Switch back to edit mode
+        openFile(newPath); // This calls force_full_redraw_internal()
+        toggleFileExplorer(); // This calls force_full_redraw_internal()
     }
 }
 
@@ -1950,10 +1974,8 @@ void Editor::toggleTerminal() {
         statusMessage = "Temrinal Mode: Ctrl-T to close";
         statusMessageTime = GetTickCount64();
     }
-    clearScreen();
-    for (auto& s : prevDrawnLines) s.assign(screenCols, ' ');
-    prevStatusMessage = "";
-    prevMessageBarMessage = "";
+    // No clearScreen here. refreshScreen's mode check will handle it.
+    force_full_redraw_internal();
 }
 
 void Editor::startTerminal() {
@@ -1968,22 +1990,20 @@ void Editor::startTerminal() {
     saAttr.bInheritHandle = TRUE;
     saAttr.lpSecurityDescriptor = NULL;
 
-    // create pipe for stdout.
     if (!CreatePipe(&hChildStdoutRead, &hChildStdoutWrite, &saAttr, 0)) {
         statusMessage = "Error: Stdout pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
         statusMessageTime = GetTickCount64(); 
         return;
     }
-    // ensure the read handle is not inherited.
     if (!SetHandleInformation(hChildStdoutRead, HANDLE_FLAG_INHERIT, 0)) {
         statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
         statusMessageTime = GetTickCount64(); 
+        CloseHandle(hChildStdoutRead); CloseHandle(hChildStdoutWrite);
         return;
     }
 
-    // Create a pipe for stdin
     if (!CreatePipe(&hChildStdinRead, &hChildStdinWrite, &saAttr, 0)) {
-        statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) = ")";
+        statusMessage = "Error: Stdin pipe creation failed. (GLE: " + std::to_string(GetLastError()) + ")";
         statusMessageTime = GetTickCount64();
         CloseHandle(hChildStdinRead); 
         CloseHandle(hChildStdinWrite);
@@ -1992,7 +2012,6 @@ void Editor::startTerminal() {
         return;
     }
 
-    // setup a start for child process
     STARTUPINFOA si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
@@ -2000,22 +2019,23 @@ void Editor::startTerminal() {
     si.hStdOutput = hChildStdoutWrite;
     si.hStdInput = hChildStdinRead;
     si.dwFlags |= STARTF_USESTDHANDLES;
-
+    
+    // Removed CREATE_NEW_CONSOLE for integrated terminal
     const char* shell_path = "cmd.exe";
     char commandLine[MAX_PATH];
     sprintf_s(commandLine, MAX_PATH, "%s", shell_path);
 
     BOOL success = CreateProcessA(
-        NULL,           // lpApplicationName
-        commandLine,    // lpCommandLine
-        NULL,           // lpProcessAttributes
-        NULL,           // lpThreadAttributes
-        TRUE,           // bInheritHandles (VERY IMPORTANT for pipe redirection)
-        CREATE_NEW_CONSOLE | NORMAL_PRIORITY_CLASS,
-        NULL,           // lpEnvironment
-        NULL,           // lpCurrentDirectory
-        &si,            // lpStartupInfo
-        &piProcInfo     // lpProcessInformation
+        NULL,
+        commandLine,
+        NULL,
+        NULL,
+        TRUE,
+        0, // dwCreationFlags, set to 0 for integrated terminal
+        NULL,
+        NULL,
+        &si,
+        &piProcInfo
     );
 
     if (!success) {
@@ -2028,7 +2048,7 @@ void Editor::startTerminal() {
     }
 
     CloseHandle(hChildStdinRead);
-    CloseHandle(hChildStdinWrite);
+    CloseHandle(hChildStdoutWrite);
     
     terminalActive = true;
     CreateThread(NULL, 0, TerminalOutputReaderThread, this, 0, NULL);
@@ -2047,6 +2067,8 @@ void Editor::startTerminal() {
     asiEscapeBuffe.clear();
 
     resizeTerminal(screenCols, screenRows - 2);
+    
+    force_full_redraw_internal(); // Invalidate cache and trigger redraw for terminal content
 }
 
 void Editor::stopTerminal() {
@@ -2097,9 +2119,6 @@ DWORD WINAPI TerminalOutputReaderThread(LPVOID lpParam) {
 
 void Editor::readTerminalOutput() {
     // The reading is handled by the background thread.
-    // This function can be a no-op or merely exist to fit the refreshScreen dispatch.
-    // The thread calls processTerminalOutput, which will modify the buffer
-    // and ideally trigger a redraw (which refreshScreen handles on next loop).
 }
 
 void Editor::writeTerminalInput(const std::string& input) {
@@ -2110,11 +2129,10 @@ void Editor::writeTerminalInput(const std::string& input) {
 }
 
 void Editor::processTerminalOutput(const std::string& data) {
-    // Basic ANSI parser state machine
     for (char c : data) {
         if (!asiEscapeBuffe.empty()) {
             asiEscapeBuffe += c;
-            if (c >= '@' && c <= '~') { // End of a CSI (Control Sequence Introducer) sequence
+            if (c >= '@' && c <= '~') {
                 if (asiEscapeBuffe.length() > 2 && asiEscapeBuffe[1] == '[') {
                     std::string params_str = asiEscapeBuffe.substr(2, asiEscapeBuffe.length() - 3);
                     ansiSGRParams.clear();
@@ -2127,81 +2145,72 @@ void Editor::processTerminalOutput(const std::string& data) {
                         while(std::getline(iss, segment, ';')) {
                             try {
                                 ansiSGRParams.push_back(std::stoi(segment));
-                            } catch (...) { /* Invalid param, ignore */ }
+                            } catch (...) { }
                         }
                     }
 
                     char final_char = asiEscapeBuffe.back();
                     if (final_char == 'm') {
                         applyAnsiSGR(ansiSGRParams);
-                    } else if (final_char == 'H' || final_char == 'f') { // CUP or HVP
+                    } else if (final_char == 'H' || final_char == 'f') {
                         int row = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
                         int col = (ansiSGRParams.size() < 2) ? 1 : ansiSGRParams[1];
                         applyAnsiCUP(row, col);
-                    } else if (final_char == 'J') { // ED (Erase Display)
+                    } else if (final_char == 'J') {
                         int param = ansiSGRParams.empty() ? 0 : ansiSGRParams[0];
                         applyAnsiED(param);
-                    } else if (final_char == 'K') { // EL (Erase Line)
+                    } else if (final_char == 'K') {
                         int param = ansiSGRParams.empty() ? 0 : ansiSGRParams[0];
                         applyAnsiEL(param);
-                    } else if (final_char == 'A') { // CUU - Cursor Up
+                    } else if (final_char == 'A') {
                          int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
                          terminalCursorY = std::max(0, terminalCursorY - num);
-                    } else if (final_char == 'B') { // CUD - Cursor Down
+                    } else if (final_char == 'B') {
                          int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
                          terminalCursorY = std::min(terminalHeight - 1, terminalCursorY + num);
-                    } else if (final_char == 'C') { // CUF - Cursor Forward
+                    } else if (final_char == 'C') {
                          int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
                          terminalCursorX = std::min(terminalWidth - 1, terminalCursorX + num);
-                    } else if (final_char == 'D') { // CUB - Cursor Backward
+                    } else if (final_char == 'D') {
                          int num = ansiSGRParams.empty() ? 1 : ansiSGRParams[0];
                          terminalCursorX = std::max(0, terminalCursorX - num);
                     }
-                    // Add more if needed (e.g., S/T for scroll, L/M for insert/delete line)
                 }
                 asiEscapeBuffe.clear();
             }
-        } else if (c == 0x1B) { // ESC
+        } else if (c == 0x1B) {
             asiEscapeBuffe += c;
         } else if (c == '\r') {
             terminalCursorX = 0;
         } else if (c == '\n') {
             terminalCursorY++;
-            terminalCursorX = 0; // Usually moves to column 0 on newline
+            terminalCursorX = 0;
             if (terminalCursorY >= terminalHeight) {
-                // Scroll up the buffer by shifting lines
                 for (int r = 0; r < terminalHeight - 1; ++r) {
                     terminalBuffer[r] = terminalBuffer[r+1];
                 }
-                // Clear the last line
                 terminalBuffer[terminalHeight-1].assign(terminalWidth, { ' ', currentFgColor, currentBgColor, currentBold });
-                terminalCursorY = terminalHeight - 1; // Stay on the last line
-                // terminalScrollOffset is not used for internal buffer scroll here
+                terminalCursorY = terminalHeight - 1;
             }
-        } else if (c == '\b') { // Backspace
+        } else if (c == '\b') {
             if (terminalCursorX > 0) {
                 terminalCursorX--;
-                // Optionally: clear the character that was backspaced over
                 if (terminalCursorY < terminalHeight && terminalCursorX < terminalWidth) {
                     terminalBuffer[terminalCursorY][terminalCursorX] = { ' ', currentFgColor, currentBgColor, currentBold };
                 }
             }
-        } else if (c == '\t') { // Tab
+        } else if (c == '\t') {
             terminalCursorX += (KILO_TAB_STOP - (terminalCursorX % KILO_TAB_STOP));
-            if (terminalCursorX >= terminalWidth) terminalCursorX = terminalWidth - 1; // Clamp
-            // Tab character itself is not stored in buffer if expanding
-            // To store tab characters literally in buffer, then expand on drawing (like editor mode)
-            // would require different handling. For now, it moves cursor.
+            if (terminalCursorX >= terminalWidth) terminalCursorX = terminalWidth - 1;
         } else {
-            // Regular character
             if (terminalCursorY < terminalHeight && terminalCursorX < terminalWidth) {
                 terminalBuffer[terminalCursorY][terminalCursorX] = { c, currentFgColor, currentBgColor, currentBold };
             }
             terminalCursorX++;
-            if (terminalCursorX >= terminalWidth) { // Auto-wrap
+            if (terminalCursorX >= terminalWidth) {
                 terminalCursorX = 0;
                 terminalCursorY++;
-                if (terminalCursorY >= terminalHeight) { // Scroll if needed
+                if (terminalCursorY >= terminalHeight) {
                     for (int r = 0; r < terminalHeight - 1; ++r) {
                         terminalBuffer[r] = terminalBuffer[r+1];
                     }
@@ -2214,7 +2223,7 @@ void Editor::processTerminalOutput(const std::string& data) {
 
     for (auto& s : prevDrawnLines)
       s.assign(screenCols, ' ');
-    prevStatusMessage = ""; 
+    prevStatusMessage = "";
     prevMessageBarMessage = "";
 }
 
@@ -2225,38 +2234,51 @@ void Editor::resizeTerminal(int width, int height) {
     for (int r = 0; r < terminalHeight; ++r) {
         terminalBuffer[r].resize(terminalWidth, { ' ', defaultFgColor, defaultBgColor, false });
     }
-    // Reset cursor and scroll after resize
     terminalCursorX = 0;
     terminalCursorY = 0;
-    terminalScrollOffset = 0; // Not actively used for internal buffer scrolling in this model
+    terminalScrollOffset = 0;
     currentFgColor = defaultFgColor;
     currentBgColor = defaultBgColor;
     currentBold = false;
     ansiSGRParams.clear();
     asiEscapeBuffe.clear();
-    clearTerminalBuffer(); // Clear content
+    clearTerminalBuffer();
     
     for (auto& s : prevDrawnLines)
-      s.assign(screenCols, ' ');  // Invalidate editor content cache
-    prevStatusMessage = "";       // Invalidate status message cache
-    prevMessageBarMessage = "";   // Invalidate message bar cache
+        s.assign(screenCols, ' ');
+    prevStatusMessage = "";
+    prevMessageBarMessage = "";
 }
 
 void Editor::drawTerminalScreen() {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
     for (int y = 0; y < terminalHeight; ++y) {
-        setCursorPosition(0, y); // Start drawing at screen (0,y)
+        std::string lineContent;
+        lineContent.reserve(terminalWidth);
+        std::vector<WORD> lineAttributes(terminalWidth);
+
         for (int x = 0; x < terminalWidth; ++x) {
             TerminalChar tc = terminalBuffer[y][x];
+            lineContent += tc.c;
             WORD attributes = tc.fgColor | tc.bgColor;
-            if (tc.bold) attributes |= FOREGROUND_INTENSITY; // Apply intensity for bold
-
-            // To avoid flashing/flicker from character-by-character writes,
-            // we should group characters with the same attribute.
-            // This is a simple per-char write, which can flicker.
-            setTextColor(attributes);
-            writeStringAt(x, y, std::string(1, tc.c));
+            if (tc.bold) attributes |= FOREGROUND_INTENSITY;
+            lineAttributes[x] = attributes;
         }
-        resetTextColor();
+
+        COORD writePos = { 0, (SHORT)y };
+
+        DWORD charsWritten;
+        if (!WriteConsoleOutputCharacterA(hConsole, lineContent.c_str(), terminalWidth, writePos, &charsWritten)) {
+            std::cerr << "Terminal: WriteConsoleOutputCharacterA failed: " << GetLastError() << std::endl;
+        }
+
+        if (!WriteConsoleOutputAttribute(hConsole, lineAttributes.data(), terminalWidth, writePos, &charsWritten)) {
+            std::cerr << "Terminal: WriteConsoleOutputAttribute failed: " << GetLastError() << std::endl;
+        }
     }
 }
 
@@ -2265,22 +2287,22 @@ void Editor::clearTerminalBuffer() {
 }
 
 void Editor::applyAnsiSGR(const std::vector<int>& params) {
-  if (params.empty()) {  // Default: reset all attributes
+  if (params.empty()) {
     currentFgColor = defaultFgColor;
     currentBgColor = defaultBgColor;
     currentBold = false;
   }
   for (int param : params) {
     switch (param) {
-      case 0:  // Reset all attributes
+      case 0:
         currentFgColor = defaultFgColor;
         currentBgColor = defaultBgColor;
         currentBold = false;
         break;
-      case 1:  // Bold/Increased Intensity
+      case 1:
         currentBold = true;
         break;
-      case 22:  // Not Bold/Normal Intensity
+      case 22:
         currentBold = false;
         break;
       case 30:
@@ -2309,7 +2331,7 @@ void Editor::applyAnsiSGR(const std::vector<int>& params) {
         break;
       case 39:
         currentFgColor = defaultFgColor;
-        break;  // Default foreground color
+        break;
       case 40:
         currentBgColor = BLACK;
         break;
@@ -2336,7 +2358,7 @@ void Editor::applyAnsiSGR(const std::vector<int>& params) {
         break;
       case 49:
         currentBgColor = defaultBgColor;
-        break;  // Default background color
+        break;
       default:
         break;
     }
@@ -2344,11 +2366,9 @@ void Editor::applyAnsiSGR(const std::vector<int>& params) {
 }
 
 void Editor::applyAnsiCUP(int row, int col) {
-  // ANSI rows/cols are 1-based. Convert to 0-based.
   terminalCursorY = std::max(0, row - 1);
   terminalCursorX = std::max(0, col - 1);
 
-  // Clamp to screen bounds
   if (terminalCursorY >= terminalHeight)
     terminalCursorY = terminalHeight - 1;
   if (terminalCursorX >= terminalWidth)
@@ -2356,45 +2376,41 @@ void Editor::applyAnsiCUP(int row, int col) {
 }
 
 void Editor::applyAnsiED(int param) {
-  if (param == 0) {  // Erase from cursor to end of screen
-    // Clear current line from cursor
+  if (param == 0) {
     for (int x = terminalCursorX; x < terminalWidth; ++x) {
       terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
                                             currentBold};
     }
-    // Clear subsequent lines
     for (int y = terminalCursorY + 1; y < terminalHeight; ++y) {
       terminalBuffer[y].assign(
           terminalWidth, {' ', currentFgColor, currentBgColor, currentBold});
     }
-  } else if (param == 1) {  // Erase from cursor to beginning of screen
-    // Clear current line from beginning to cursor
+  } else if (param == 1) {
     for (int x = 0; x <= terminalCursorX; ++x) {
       terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
                                             currentBold};
     }
-    // Clear preceding lines
     for (int y = 0; y < terminalCursorY; ++y) {
       terminalBuffer[y].assign(
           terminalWidth, {' ', currentFgColor, currentBgColor, currentBold});
     }
-  } else if (param == 2) {  // Erase entire screen
+  } else if (param == 2) {
     clearTerminalBuffer();
   }
 }
 
 void Editor::applyAnsiEL(int param) {
-  if (param == 0) {  // Erase from cursor to end of line
+  if (param == 0) {
     for (int x = terminalCursorX; x < terminalWidth; ++x) {
       terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
                                             currentBold};
     }
-  } else if (param == 1) {  // Erase from cursor to beginning of line
+  } else if (param == 1) {
     for (int x = 0; x <= terminalCursorX; ++x) {
       terminalBuffer[terminalCursorY][x] = {' ', currentFgColor, currentBgColor,
                                             currentBold};
     }
-  } else if (param == 2) {  // Erase entire line
+  } else if (param == 2) {
     terminalBuffer[terminalCursorY].assign(
         terminalWidth, {' ', currentFgColor, currentBgColor, currentBold});
   }
@@ -2403,10 +2419,20 @@ void Editor::applyAnsiEL(int param) {
 void Editor::refreshScreen() {
     setCursorVisibility(false);
 
-    updateScreenSize();
+    // Check if mode has changed since last render or initial draw
+    if (mode != lastRenderedMode) {
+        clearScreen(); // ONLY clear the screen if mode has just changed
+        // No explicit force_full_redraw_internal here, as it's implied by clearing
+        // and the fact that the draw function will write everything anew.
+        // However, force_full_redraw_internal is safe here if desired, as it only invalidates.
+        force_full_redraw_internal(); // Invalidate cache for new mode's content
+        lastRenderedMode = mode; // Update last rendered mode
+    }
+
+    updateScreenSize(); // Ensure dimensions are up-to-date and prevDrawnLines resized
 
     if (mode == EDIT_MODE || mode == PROMPT_MODE) {
-        scroll();   
+        scroll();
         drawScreenContent();
     } else if (mode == FILE_EXPLORER_MODE) {
         drawFileExplorer();
@@ -2430,7 +2456,7 @@ void Editor::refreshScreen() {
         finalCursorY = std::max(0, std::min(finalCursorY, screenRows - 3));
     } else if (mode == PROMPT_MODE) {
         finalCursorX = promptMessage.length() + searchQuery.length();
-        finalCursorY = screenRows - 1; // Last row for prompt
+        finalCursorY = screenRows - 1;
         finalCursorX = std::min(finalCursorX, screenCols - 1);
     } else if (mode == TERMINAL_MODE) {
         finalCursorX = terminalCursorX;
@@ -2438,13 +2464,13 @@ void Editor::refreshScreen() {
         finalCursorX = std::max(0, std::min(finalCursorX, screenCols - 1));
         finalCursorY = std::max(0, std::min(finalCursorY, screenRows - 3));
     }
-    else { 
-        int explorer_content_start_row = 2; // PATH line (row 0) + 1 blank line (row 1) = content starts at row 2
-        finalCursorX = 0; // Always column 0 for selected item's visual cue
+    else {
+        int explorer_content_start_row = 2;
+        finalCursorX = 0;
         finalCursorY = explorer_content_start_row + (selectedFileIndex - fileExplorerScrollOffset);
 
         finalCursorY = std::max(explorer_content_start_row, std::min(finalCursorY, screenRows - 3));
-        finalCursorX = std::min(finalCursorX, screenCols - 1); // Clamp X (always 0, should be fine)
+        finalCursorX = std::min(finalCursorX, screenCols - 1);
     }
 
     setCursorPosition(finalCursorX, finalCursorY);
@@ -2468,40 +2494,143 @@ void Editor::clearScreen() {
     COORD homeCoords = { 0, 0 };
     DWORD charsWritten;
 
-    // Fill the entire screen buffer with spaces
-    if (!FillConsoleOutputCharacterA(hConsole,      // Handle to console screen buffer
-                                     (TCHAR)' ',    // Character to write to the buffer
-                                     cellsCount,    // Number of cells to write
-                                     homeCoords,    // Coordinate of the first cell
-                                     &charsWritten)) // Number of characters written
+    if (!FillConsoleOutputCharacterA(hConsole,
+                                     (TCHAR)' ',
+                                     cellsCount,
+                                     homeCoords,
+                                     &charsWritten))
     {
         std::cerr << "Error: FillConsoleOutputCharacterA failed in clearScreen. GLE: " << GetLastError() << std::endl;
         return;
     }
 
-    // Fill the entire screen buffer with the current default attributes
-    // This ensures consistent background/foreground colors after clearing.
-    // Using defaultFgColor and defaultBgColor stored in Editor for consistency.
-    if (!FillConsoleOutputAttribute(hConsole,        // Handle to console screen buffer
-                                    defaultFgColor | defaultBgColor, // Attributes to set
-                                    cellsCount,      // Number of cells to set attributes
-                                    homeCoords,      // Coordinate of the first cell
-                                    &charsWritten))  // Number of cells modified
+    if (!FillConsoleOutputAttribute(hConsole,
+                                    defaultFgColor | defaultBgColor,
+                                    cellsCount,
+                                    homeCoords,
+                                    &charsWritten))
     {
         std::cerr << "Error: FillConsoleOutputAttribute failed in clearScreen. GLE: " << GetLastError() << std::endl;
         return;
     }
 
-    // Move the cursor to the home position (top-left)
     SetConsoleCursorPosition(hConsole, homeCoords);
 }
 
 void Editor::force_full_redraw_internal() {
     for (auto& s : prevDrawnLines) {
-        s.assign(screenCols, ' '); // Fill with spaces to force a diff
+        s.assign(screenCols, ' ');
     }
 
-    // Invalidate cached status and message bar content
     prevStatusMessage = "";
     prevMessageBarMessage = "";
+}
+
+bool Editor::setConsoleFont(const ConsoleFontInfo& fontInfo) {
+    HANDLE hConsoleOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsoleOutput == INVALID_HANDLE_VALUE) {
+        statusMessage = "Error: Invalid console output handle for font setting.";
+        statusMessageTime = GetTickCount64() + 3000;
+        return false;
+    }
+
+    CONSOLE_FONT_INFOEX cfi;
+    cfi.cbSize = sizeof(cfi);
+    if (!GetCurrentConsoleFontEx(hConsoleOutput, FALSE, &cfi)) {
+        statusMessage = "Error: GetCurrentConsoleFontEx failed for font setting. GLE: " + std::to_string(GetLastError());
+        statusMessageTime = GetTickCount64() + 3000;
+        return false;
+    }
+
+    cfi.dwFontSize.X = fontInfo.fontSizeX;
+    cfi.dwFontSize.Y = fontInfo.fontSizeY;
+
+    // Convert std::string (MultiByte) to WCHAR (WideChar)
+    MultiByteToWideChar(CP_ACP, 0, fontInfo.name.c_str(), -1, cfi.FaceName, LF_FACESIZE);
+
+    if (!SetCurrentConsoleFontEx(hConsoleOutput, FALSE, &cfi)) {
+        statusMessage = "Error: SetCurrentConsoleFontEx failed. GLE: " + std::to_string(GetLastError());
+        statusMessageTime = GetTickCount64() + 3000;
+        return false;
+    }
+
+    updateScreenSize(); // This will recalculate screenRows/Cols based on new font size
+    force_full_redraw_internal(); // Force a full visual update with new dimensions
+
+    currentFont = fontInfo;
+    statusMessage = "Font set to " + fontInfo.name + " [" + std::to_string(fontInfo.fontSizeX) + "x" + std::to_string(fontInfo.fontSizeY) + "]";
+    statusMessageTime = GetTickCount64() + 3000;
+    return true;
+}
+
+ConsoleFontInfo Editor::getCurrentConsoleFont() {
+    HANDLE hConsoleOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsoleOutput == INVALID_HANDLE_VALUE) {
+        return {"ErrorFont", 0, 0};
+    }
+
+    CONSOLE_FONT_INFOEX cfi;
+    cfi.cbSize = sizeof(cfi);
+    if (!GetCurrentConsoleFontEx(hConsoleOutput, FALSE, &cfi)) {
+        return {"ErrorFont", 0, 0};
+    }
+
+    char buffer[LF_FACESIZE];
+    WideCharToMultiByte(CP_ACP, 0, cfi.FaceName, -1, buffer, LF_FACESIZE, NULL, NULL);
+
+    return {std::string(buffer), cfi.dwFontSize.X, cfi.dwFontSize.Y};
+}
+
+std::vector<ConsoleFontInfo> Editor::getAvailableConsoleFonts() {
+    FontEnumData data;
+
+    HDC hdc = GetDC(NULL);
+    if (!hdc) {
+        statusMessage = "Error: Could not get screen device context for fonts.";
+        statusMessageTime = GetTickCount64() + 3000;
+        return {};
+    }
+
+    LOGFONT lf = {0};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    std::wcscpy(lf.lfFaceName, L""); // Enumerate all fonts
+
+    EnumFontFamiliesEx(hdc, &lf, (FONTENUMPROC)EnumFontFamExProc, (LPARAM)&data, 0);
+
+    ReleaseDC(NULL, hdc);
+
+    // Filter for uniqueness
+    std::sort(data.fonts.begin(), data.fonts.end(), [](const ConsoleFontInfo& a, const ConsoleFontInfo& b){
+        return a.name < b.name;
+    });
+    data.fonts.erase(std::unique(data.fonts.begin(), data.fonts.end(), [](const ConsoleFontInfo& a, const ConsoleFontInfo& b){
+        return a.name == b.name;
+    }), data.fonts.end());
+
+
+    // Filter for common console-friendly fonts for a more curated list
+    std::vector<ConsoleFontInfo> commonFonts;
+    for(const auto& font : data.fonts) {
+        if (font.name.find("Consolas") != std::string::npos ||
+            font.name.find("Lucida Console") != std::string::npos ||
+            font.name.find("Cascadia Code") != std::string::npos ||
+            font.name.find("Fira Code") != std::string::npos ||
+            font.name.find("Inconsolata") != std::string::npos ||
+            font.name.find("Ubuntu Mono") != std::string::npos ||
+            font.name.find("Source Code Pro") != std::string::npos)
+        {
+            commonFonts.push_back({font.name, 0, 0});
+        }
+    }
+    // Fallback if no common fonts are found (e.g., on a minimal system)
+    if (commonFonts.empty() && !data.fonts.empty()) {
+        // Add all unique fonts if no common ones found, as a fallback
+        commonFonts = data.fonts;
+    } else if (commonFonts.empty()) {
+        // Add some absolute defaults if enumeration failed or found nothing
+        commonFonts.push_back({"Consolas", 0, 0});
+        commonFonts.push_back({"Lucida Console", 0, 0});
+    }
+
+    return commonFonts;
 }

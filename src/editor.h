@@ -39,6 +39,12 @@ struct TerminalChar {
 	bool bold;
 };
 
+struct ConsoleFontInfo {
+    std::string name;
+    short fontSizeX;
+    short fontSizeY;
+};
+
 struct Editor {
 public:
     static std::map<std::string, std::string> plugin_data_storage;
@@ -87,15 +93,19 @@ public:
 	HANDLE hChildStdoutRead;
 	HANDLE hChildStdoutWrite;
 	PROCESS_INFORMATION piProcInfo;
+    HANDLE hConsoleInput;
+    DWORD originalConsoleMode;
 
 	std::string asiEscapeBuffe;
 	std::vector<int> ansiSGRParams;
 	int currentFgColor;
 	int currentBgColor;
 	bool currentBold;
+	WORD defaultFgColor;
+	WORD defaultBgColor;
+    EditorMode lastRenderedMode = EDIT_MODE;
 
-	int defaultFgColor;
-	int defaultBgColor;
+    ConsoleFontInfo currentFont;
 
 	Editor();
 	~Editor();
@@ -164,6 +174,10 @@ public:
     void triggerEvent(const std::string& eventName, int param = 0);
     void triggerEvent(const std::string& eventName, const std::string& param);
 	void calculateLineNumberWidth();
+
+    bool setConsoleFont(const ConsoleFontInfo& fontInfo);
+    ConsoleFontInfo getCurrentConsoleFont();
+    std::vector<ConsoleFontInfo> getAvailableConsoleFonts();
 
 private:
 	void drawScreenContent();

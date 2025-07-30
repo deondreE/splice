@@ -4,7 +4,7 @@ Here's a comprehensive list of functions and properties available in the editor_
 
 editor_api Table
 
-# Editor State & Information
+## Editor State & Information
 
 - editor.set_status_message(message, [duration_ms])
   - Sets the text displayed in the editor's status bar.
@@ -29,7 +29,7 @@ editor_api Table
 - editor.is_ctrl_pressed()
   - Returns (boolean): true if the Ctrl key is currently held down, false otherwise.
 
-# Text Buffer Manipulation
+## Text Buffer Manipulation
 
 - editor.get_line_count()
   - Returns (integer): The total number of lines in the current editor buffer.
@@ -59,7 +59,7 @@ editor_api Table
 - editor.get_tab_stop_width()
   - Returns (integer): The number of spaces a tab character (\t) expands to for display and cursor movement.
 
-# Cursor & View Management
+## Cursor & View Management
 
 - editor.get_cursor_x()
   - Returns (integer): The 1-based column index of the cursor's current position.
@@ -79,7 +79,7 @@ editor_api Table
 - editor.center_view_on_cursor()
   - Adjusts the editor's scroll offsets (row_offset, col_offset) to ensure the cursor is fully visible on screen, attempting to center it if possible.
 
-# File System & Editor Actions
+## File System & Editor Actions
 
 - editor.get_current_filename()
   - Returns (string): The full path of the currently open file. Returns an empty string ("") if no file is currently loaded.
@@ -114,7 +114,14 @@ editor_api Table
   - path (string): The full path of the directory to delete. The directory must be empty.
   - Returns (boolean, string): true on success, or false and an error message string on failure.
 
-# User Interaction & Prompts
+## Terminal Interaction
+
+- editor.send_terminal_input(text)
+  - text (string): Sends the given text as input to the integrated terminal.
+- editor.toggle_terminal()
+  - Switches between editor and integrated terminal modes.
+
+## User Interaction & Prompts
 
 - editor.prompt(prompt_message, [default_value])
   - prompt_message (string): The message to display to the user in the message bar.
@@ -122,7 +129,26 @@ editor_api Table
   - Returns (boolean): true if the prompt mode was successfully initiated.
   - Note: This function currently initiates a prompt in the editor's message bar and returns immediately. To get the user's input back into Lua, you would need to use a more advanced pattern (e.g., C++ callbacks to Lua, or Lua coroutines managed by C++). The current implementation does not block Lua execution until the user presses Enter.
 
-# Helper Functions
+## Font Controls (NEW)
+
+- editor.set_console_font(font_name, font_size_x, font_size_y)
+  - Sets the console's font family and character cell size. This affects the entire console window.
+  - font_name (string): The name of the font (e.g., "Consolas", "Lucida Console", "Cascadia Code").
+  - font_size_x (integer): The desired width of a character cell in pixels.
+  - font_size_y (integer): The desired height of a character cell in pixels.
+  - Returns (boolean): true if the font was set successfully, false otherwise.
+  - Note: The console host might adjust the requested size to the closest available matching font.
+- editor.get_current_console_font()
+  - Returns (string, integer, integer): font_name, font_size_x, font_size_y representing the currently active console font's name and its actual character cell dimensions in pixels.
+- editor.get_available_console_fonts()
+  - Returns (table): A Lua table of available fixed-pitch, TrueType fonts suitable for console display on the system.
+    - Each element in the table is a sub-table with:
+      - name (string): The font's name.
+      - size_x (integer): Placeholder for X size (usually 0, actual size negotiated by console).
+      - size_y (integer): Placeholder for Y size (usually 0, actual size negotiated by console).
+    - Note: The sizes returned here are often placeholder 0s from the enumeration; the console itself determines the valid sizes a font can be set to. Use set_console_font with desired pixel sizes, and get_current_console_font to confirm the applied size.
+
+## Helper Functions
 
 - editor.path_join(part1, part2, ...)
   - Takes a variable number of string arguments, concatenating them into a valid path using platform-specific separators.
@@ -138,7 +164,7 @@ editor_api Table
   - Returns (integer): The exit code of the executed command.
   - Note: This is a blocking call and typically won't capture command output directly within the editor UI. Use editor.send_terminal_input() for interactive terminal commands.
 
-# Plugin Data Persistence
+## Plugin Data Persistence
 
 - editor.save_plugin_data(key, value_string)
   - key (string): A unique identifier for the data.
@@ -149,7 +175,7 @@ editor_api Table
   - key (string): The unique identifier for the data to load.
   - Returns (string, or nil): The previously saved string data, or nil if no data is found for the key.
 
-# Event Handling
+## Event Handling
 
 Plugins can register Lua functions to be called when specific events occur in the editor. This allows for powerful and reactive plugin behavior.
 
