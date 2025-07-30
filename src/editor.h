@@ -15,6 +15,8 @@ enum EditorMode {
 	TERMINAL_MODE
 };
 
+struct lua_State;
+
 struct DirEntry {
 	std::string name;
 	bool isDirectory;
@@ -38,6 +40,8 @@ struct TerminalChar {
 };
 
 struct Editor {
+public:
+    static std::map<std::string, std::string> plugin_data_storage;
 	std::vector<std::string> lines;
 	std::string filename;
 	int cursorX;
@@ -120,10 +124,27 @@ struct Editor {
 	bool promptUser(const std::string& prompt, int input_c, std::string& result);
 
 	void initializeLua();
-	void finalizeLua();
-	void loadLuaPlugins(const std::string& pluginDir = "plugins");
-	bool executeLuaPluginCommand(const std::string& pluginName, const std::string& commandName);
-	void exposeEditorToLua();
+    void finalizeLua();
+    void exposeEditorToLua();
+    void loadLuaPlugins(const std::string& pluginDir = "./plugins");
+    bool executeLuaPluginCommand(const std::string& pluginName, const std::string& commandName);
+
+    struct LuaCallback {
+        int funcRef;
+        lua_State* L_state;
+    };
+
+    std::vector<LuaCallback> onKeyPressCallbacks;
+    std::vector<LuaCallback> onFileOpenedCallbacks;
+    std::vector<LuaCallback> onFileSavedCallbacks;
+    std::vector<LuaCallback> onBufferChangedCallbacks;
+    std::vector<LuaCallback> onCursorMovedCallbacks;
+    std::vector<LuaCallback> onModeChangedCallbacks;
+
+    bool ctrl_pressed = false;
+    std::string promptResult;
+    void force_full_redraw_internal();
+    void clearScreen();
 
 	void toggleTerminal();
 	void startTerminal();
@@ -137,14 +158,17 @@ struct Editor {
 	void applyAnsiSGR(const std::vector<int>& params);
 	void applyAnsiCUP(int row, int col);
 	void applyAnsiED(int param);
+    void scroll();
 	void applyAnsiEL(int param);
+    void triggerEvent(const std::string& eventName, int param = 0);
+    void triggerEvent(const std::string& eventName, const std::string& param);
+	void calculateLineNumberWidth();
 
 private:
-	void calculateLineNumberWidth();
 	void drawScreenContent();
 	void drawStatusBar();
 	void drawMessageBar();
-	void scroll();
+
 	std::string trimRight(const std::string& s);
 
 	int cxToRx(int lineIndex, int cx);

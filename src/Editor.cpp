@@ -3,120 +3,662 @@
 #include <algorithm>
 #include "win_console_utils.h"
 #include <iostream>
+#include "lua_api.h"
 #include <Shlwapi.h>
 #pragma comment(lib, "Shlwapi.lib")
 
 DWORD WINAPI TerminalOutputReaderThread(LPVOID lpParam);
 
-///Lua
-int lua_set_status_message(lua_State* L) {
-    // Get the Editor* from Lua's registry or closure (we'll push it into a closure)
+#pragma region  Lua
+
+int lua_get_line(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) {
-        return luaL_error(L, "Editor instance not found in upvalue.");
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+
+    int line_num = lua_tointeger(L, 1) - 1; // Lua is 1-based, C++ is 0-based
+    if (line_num >= 0 && line_num < editor->lines.size()) {
+        lua_pushstring(L, editor->lines[line_num].c_str());
+    } else {
+        lua_pushstring(L, ""); // Return empty string for out-of-bounds lines
+    }
+    return 1;
+}
+
+int lua_set_line(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+    if (!lua_isstring(L, 2)) return luaL_error(L, "Argument #2 (text) must be a string.");
+
+    int line_num = lua_tointeger(L, 1) - 1;
+    std::string new_text = lua_tostring(L, 2);
+
+    if (line_num >= 0 && line_num < editor->lines.size()) {
+        editor->lines[line_num] = new_text;
+        editor->dirty = true;
+        editor->calculateLineNumberWidth();
+        editor->force_full_redraw_internal(); // Use the internal method
+        editor->triggerEvent("on_buffer_changed"); // Trigger buffer changed event
+    } else {
+        return luaL_error(L, "Line number %d is out of bounds.", line_num + 1);
+    }
+    return 0;
+}
+
+int lua_insert_line(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+    if (!lua_isstring(L, 2)) return luaL_error(L, "Argument #2 (text) must be a string.");
+
+    int line_num = lua_tointeger(L, 1) - 1;
+    std::string text = lua_tostring(L, 2);
+
+    if (line_num >= 0 && line_num <= editor->lines.size()) { // Can insert at end (size())
+        editor->lines.insert(editor->lines.begin() + line_num, text);
+        editor->dirty = true;
+        editor->calculateLineNumberWidth();
+        editor->force_full_redraw_internal();
+        editor->triggerEvent("on_buffer_changed");
+    } else {
+        return luaL_error(L, "Insertion line number %d is out of bounds.", line_num + 1);
+    }
+    return 0;
+}
+
+int lua_delete_line(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+
+    int line_num = lua_tointeger(L, 1) - 1;
+
+    if (editor->lines.empty()) return 0; // Nothing to delete
+    if (line_num >= 0 && line_num < editor->lines.size()) {
+        editor->lines.erase(editor->lines.begin() + line_num);
+        if (editor->lines.empty()) { // Ensure at least one empty line
+            editor->lines.push_back("");
+        }
+        editor->dirty = true;
+        editor->calculateLineNumberWidth();
+        editor->force_full_redraw_internal();
+        editor->triggerEvent("on_buffer_changed");
+    } else {
+        return luaL_error(L, "Deletion line number %d is out of bounds.", line_num + 1);
+    }
+    return 0;
+}
+
+int lua_get_buffer_content(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    lua_newtable(L); // Create a new Lua table
+    for (int i = 0; i < editor->lines.size(); ++i) {
+        lua_pushstring(L, editor->lines[i].c_str());
+        lua_rawseti(L, -2, i + 1); // Set table[i+1] = line_content (Lua is 1-based)
+    }
+    return 1; // Return the table
+}
+
+int lua_set_buffer_content(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_istable(L, 1)) return luaL_error(L, "Argument #1 (content) must be a table of strings.");
+
+    editor->lines.clear();
+    int table_len = luaL_len(L, 1); // Get table length
+    for (int i = 1; i <= table_len; ++i) {
+        lua_rawgeti(L, 1, i); // Get table[i]
+        if (lua_isstring(L, -1)) {
+            editor->lines.push_back(lua_tostring(L, -1));
+        } else {
+            // Handle non-string elements if necessary, e.g., push an empty string
+            editor->lines.push_back("");
+        }
+        lua_pop(L, 1); // Pop the value
+    }
+    if (editor->lines.empty()) editor->lines.push_back(""); // Ensure at least one line
+
+    editor->cursorX = 0;
+    editor->cursorY = 0;
+    editor->rowOffset = 0;
+    editor->colOffset = 0;
+    editor->dirty = true;
+    editor->calculateLineNumberWidth();
+    editor->force_full_redraw_internal();
+    editor->triggerEvent("on_buffer_changed");
+    return 0;
+}
+
+int lua_get_char_at(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1) || !lua_isinteger(L, 2)) return luaL_error(L, "Arguments (line, col) must be integers.");
+
+    int line = lua_tointeger(L, 1) - 1; // Lua 1-based to C++ 0-based
+    int col = lua_tointeger(L, 2) - 1;
+
+    if (line >= 0 && line < editor->lines.size() && col >= 0 && col < editor->lines[line].length()) {
+        lua_pushstring(L, std::string(1, editor->lines[line][col]).c_str());
+    } else {
+        lua_pushnil(L); // Return nil if out of bounds
+    }
+    return 1;
+}
+
+int lua_get_tab_stop_width(lua_State* L) {
+    lua_pushinteger(L, KILO_TAB_STOP); // KILO_TAB_STOP must be accessible (e.g., in editor.h)
+    return 1;
+}
+
+int lua_set_cursor_position(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1) || !lua_isinteger(L, 2)) return luaL_error(L, "Arguments (x, y) must be integers.");
+
+    int x = lua_tointeger(L, 1) - 1;
+    int y = lua_tointeger(L, 2) - 1;
+
+    // Clamp cursor to valid positions
+    if (y < 0) y = 0;
+    if (y >= editor->lines.size()) y = editor->lines.size() - 1;
+    if (editor->lines.empty()) { // Handle empty file special case
+        y = 0; x = 0;
+    } else {
+        if (x < 0) x = 0;
+        if (x > editor->lines[y].length()) x = editor->lines[y].length();
     }
 
-    // Check arguments: expects (string message)
-    if (!lua_isstring(L, 1)) {
-        return luaL_error(L, "Argument #1 (message) must be a string.");
+    editor->cursorX = x;
+    editor->cursorY = y;
+    editor->scroll(); // Adjust scroll to make cursor visible
+    return 0;
+}
+
+int lua_set_row_offset(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (offset) must be an integer.");
+    editor->rowOffset = std::max(0, (int)lua_tointeger(L, 1));
+    editor->force_full_redraw_internal();
+    return 0;
+}
+
+int lua_set_col_offset(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (offset) must be an integer.");
+    editor->colOffset = std::max(0, (int)lua_tointeger(L, 1));
+    editor->force_full_redraw_internal();
+    return 0;
+}
+
+int lua_get_row_offset(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->rowOffset);
+    return 1;
+}
+
+int lua_get_col_offset(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->colOffset);
+    return 1;
+}
+
+int lua_center_view_on_cursor(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    editor->scroll(); // `scroll` already tries to keep the cursor in view.
+                      // To truly center, you'd calculate target offsets based on cursor.
+                      // For now, `scroll` is sufficient.
+    return 0;
+}
+
+
+int lua_open_file(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+
+    std::string path = lua_tostring(L, 1);
+    bool success = editor->openFile(path);
+    lua_pushboolean(L, success);
+    return 1;
+}
+
+int lua_save_file(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    bool success = editor->saveFile();
+    lua_pushboolean(L, success);
+    return 1;
+}
+
+int lua_is_dirty(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushboolean(L, editor->dirty);
+    return 1;
+}
+
+int lua_get_directory_path(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushstring(L, editor->currentDirPath.c_str());
+    return 1;
+}
+
+int lua_set_directory_path(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+    editor->populateDirectoryEntries(path); // Re-use existing populate logic
+    // Also update internal currentDirPath member if it's not done in populateDirectoryEntries
+    editor->currentDirPath = path;
+    return 0;
+}
+
+// Implementing lua_list_directory would involve replicating some of populateDirectoryEntries
+// but returning the result as a Lua table of tables { {name="file", is_dir=true}, ... }
+int lua_list_directory(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    std::string path = lua_tostring(L, 1); // Optional: path, else use currentDirPath
+
+    std::string targetPath = path.empty() ? editor->currentDirPath : path;
+
+    std::vector<DirEntry> entries;
+    WIN32_FIND_DATAA findFileData;
+    HANDLE hFind = FindFirstFileA((targetPath + "\\*").c_str(), &findFileData);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        lua_pushnil(L); // Indicate failure
+        lua_pushstring(L, ("Error: Could not list directory '" + targetPath + "'").c_str());
+        return 2;
     }
+
+    do {
+        std::string entryName = findFileData.cFileName;
+        if (entryName == "." || entryName == "..") {
+            continue;
+        }
+        bool isDir = (findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        entries.push_back({ entryName, isDir });
+    } while (FindNextFileA(hFind, &findFileData) != 0);
+    FindClose(hFind);
+
+    // Sort entries (optional, but good practice)
+    std::sort(entries.begin(), entries.end(), [](const DirEntry& a, const DirEntry& b) {
+        if (a.isDirectory && !b.isDirectory) return true;
+        if (!a.isDirectory && b.isDirectory) return false;
+        return a.name < b.name;
+    });
+
+    lua_newtable(L); // Main table to hold directory entries
+    for (int i = 0; i < entries.size(); ++i) {
+        lua_newtable(L); // Table for each entry
+        lua_pushstring(L, entries[i].name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushboolean(L, entries[i].isDirectory);
+        lua_setfield(L, -2, "is_directory");
+        lua_rawseti(L, -2, i + 1); // Add entry table to main table
+    }
+    return 1; // Return the table of entries
+}
+
+int lua_create_file(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+
+    HANDLE hFile = CreateFileA(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, ("Failed to create file: " + std::to_string(GetLastError())).c_str());
+        return 2;
+    }
+    CloseHandle(hFile);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int lua_create_directory(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+
+    if (CreateDirectoryA(path.c_str(), NULL)) {
+        lua_pushboolean(L, true);
+        return 1;
+    } else {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, ("Failed to create directory: " + std::to_string(GetLastError())).c_str());
+        return 2;
+    }
+}
+
+int lua_delete_file(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+
+    if (DeleteFileA(path.c_str())) {
+        lua_pushboolean(L, true);
+    } else {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, ("Failed to delete file: " + std::to_string(GetLastError())).c_str());
+        return 2;
+    }
+    return 1;
+}
+
+int lua_delete_directory(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+
+    if (RemoveDirectoryA(path.c_str())) {
+        lua_pushboolean(L, true);
+    } else {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, ("Failed to remove directory: " + std::to_string(GetLastError())).c_str());
+        return 2;
+    }
+    return 1;
+}
+
+// You'll need to adapt Editor::promptUser to be driven by lua_prompt_user
+// and potentially resume the Lua coroutine/call a Lua callback when input is ready.
+// For now, a simplified non-blocking version:
+int lua_prompt_user(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (prompt_message) must be a string.");
+
+    std::string prompt_msg = lua_tostring(L, 1);
+    std::string default_val = "";
+    if (lua_isstring(L, 2)) {
+        default_val = lua_tostring(L, 2);
+    }
+
+    // Store the Lua state and potentially a callback for later resumption
+    // This simplified version just sets the mode and assumes C++ event loop will handle
+    editor->mode = PROMPT_MODE;
+    editor->promptMessage = prompt_msg;
+    editor->searchQuery = default_val; // Reusing searchQuery for user input
+    editor->statusMessage = editor->promptMessage + editor->searchQuery;
+    editor->statusMessageTime = GetTickCount64();
+    editor->force_full_redraw_internal();
+
+    // This would typically return a temporary value or nil and then rely on a callback
+    // or a C++ side mechanism to push the result to Lua when input is finished.
+    // For a true blocking call (from Lua's perspective), you'd need Lua coroutines.
+    // For now, let's just indicate that the prompt is active.
+    lua_pushboolean(L, true); // Indicate prompt started
+    return 1;
+}
+
+// A helper for showing messages with explicit duration
+int lua_show_message(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (message) must be a string.");
+
     std::string message = lua_tostring(L, 1);
+    ULONGLONG duration_ms = 5000; // Default 5 seconds
+    if (lua_isinteger(L, 2)) {
+        duration_ms = lua_tointeger(L, 2);
+    }
 
     editor->statusMessage = message;
+    editor->statusMessageTime = GetTickCount64() + duration_ms; // Set expiry time
+    return 0;
+}
+
+int lua_show_error(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (error_message) must be a string.");
+
+    std::string message = "Error: " + std::string(lua_tostring(L, 1));
+    ULONGLONG duration_ms = 8000; // Default 8 seconds for errors
+    if (lua_isinteger(L, 2)) {
+        duration_ms = lua_tointeger(L, 2);
+    }
+
+    editor->statusMessage = message;
+    editor->statusMessageTime = GetTickCount64() + duration_ms;
+    // Optionally set a different color attribute for error messages in Editor::drawMessageBar()
+    return 0;
+}
+
+int lua_get_screen_size(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    lua_pushinteger(L, editor->screenCols);
+    lua_pushinteger(L, editor->screenRows);
+    return 2;
+}
+
+int lua_send_terminal_input(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (input_text) must be a string.");
+
+    std::string input = lua_tostring(L, 1);
+    editor->writeTerminalInput(input);
+    return 0;
+}
+
+int lua_toggle_terminal(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    editor->toggleTerminal();
+    return 0;
+}
+
+int lua_path_join(lua_State* L) {
+    // Lua function will take variable number of string arguments
+    int n_args = lua_gettop(L);
+    if (n_args == 0) {
+        lua_pushstring(L, "");
+        return 1;
+    }
+
+    std::string result_path = lua_tostring(L, 1);
+    for (int i = 2; i <= n_args; ++i) {
+        if (!lua_isstring(L, i)) {
+            return luaL_error(L, "Argument #%d must be a string.", i);
+        }
+        std::string part = lua_tostring(L, i);
+        char combined[MAX_PATH];
+        if (!PathCombineA(combined, result_path.c_str(), part.c_str())) {
+            return luaL_error(L, "Failed to combine paths: %s + %s", result_path.c_str(), part.c_str());
+        }
+        result_path = combined;
+    }
+    lua_pushstring(L, result_path.c_str());
+    return 1;
+}
+
+int lua_file_exists(lua_State* L) {
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    lua_pushboolean(L, (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)));
+    return 1;
+}
+
+int lua_is_directory(lua_State* L) {
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (path) must be a string.");
+    std::string path = lua_tostring(L, 1);
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    lua_pushboolean(L, (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)));
+    return 1;
+}
+
+int lua_execute_command(lua_State* L) {
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (command) must be a string.");
+    std::string command = lua_tostring(L, 1);
+
+    // This is a very basic execution and won't capture output or handle interactivity.
+    // For proper handling, you'd integrate with your terminal logic or CreateProcessWithToken/ShellExecuteEx
+    int result = system(command.c_str()); // system() blocks and outputs to console
+    lua_pushinteger(L, result);
+    return 1;
+}
+
+int lua_register_event_handler(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (event_name) must be a string.");
+    if (!lua_isfunction(L, 2)) return luaL_error(L, "Argument #2 (handler_function) must be a function.");
+
+    std::string event_name = lua_tostring(L, 1);
+    lua_pushvalue(L, 2); // Push the function onto the top of the stack
+    int funcRef = luaL_ref(L, LUA_REGISTRYINDEX); // Store a reference to it
+
+    // Store with its L_state for correct context when triggering
+    if (event_name == "on_key_press") {
+        editor->onKeyPressCallbacks.push_back({funcRef, L});
+    } else if (event_name == "on_file_opened") {
+        editor->onFileOpenedCallbacks.push_back({funcRef, L});
+    } else if (event_name == "on_file_saved") {
+        editor->onFileSavedCallbacks.push_back({funcRef, L});
+    } else if (event_name == "on_buffer_changed") {
+        editor->onBufferChangedCallbacks.push_back({funcRef, L});
+    } else if (event_name == "on_cursor_moved") {
+        editor->onCursorMovedCallbacks.push_back({funcRef, L});
+    } else if (event_name == "on_mode_changed") {
+        editor->onModeChangedCallbacks.push_back({funcRef, L});
+    } else {
+        luaL_unref(L, LUA_REGISTRYINDEX, funcRef); // Unref if unknown
+        return luaL_error(L, "Unknown event name: %s", event_name.c_str());
+    }
+    return 0;
+}
+
+int lua_is_ctrl_pressed(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    // This requires Editor to track Ctrl key state from input polling
+    lua_pushboolean(L, editor->ctrl_pressed);
+    return 1;
+}
+
+// --- Plugin Data Persistence ---
+// These would typically save/load JSON/INI to a plugin-specific file
+// For simplicity, let's use a dummy implementation for now.
+// A proper implementation would need a mechanism to map 'key' to a filename,
+// and handle serialization/deserialization (e.g., using a Lua JSON library or custom C++ code).
+
+// Dummy storage for plugin data
+static std::map<std::string, std::string> plugin_data_storage; // Use map for simplicity, convert to file IO later
+
+int lua_save_plugin_data(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (key) must be a string.");
+    if (!lua_isstring(L, 2)) return luaL_error(L, "Argument #2 (value) must be a string.");
+
+    std::string key = lua_tostring(L, 1);
+    std::string value = lua_tostring(L, 2);
+
+    // In a real scenario, serialize value (e.g., a table) to JSON/string and write to file.
+    // For this dummy, we just store the string.
+    plugin_data_storage[key] = value;
+    editor->statusMessage = "Plugin data saved for key: " + key;
     editor->statusMessageTime = GetTickCount64();
-    return 0; // Number of return values on the Lua stack
+    lua_pushboolean(L, true);
+    return 1;
 }
 
-int lua_insert_text(lua_State* L) {
+int lua_load_plugin_data(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (key) must be a string.");
 
-    if (!lua_isstring(L, 1)) {
-        return luaL_error(L, "Argument #1 (text) must be a string.");
+    std::string key = lua_tostring(L, 1);
+    if (plugin_data_storage.count(key)) {
+        // In a real scenario, read from file and deserialize into Lua table/value.
+        lua_pushstring(L, plugin_data_storage[key].c_str());
+        return 1;
+    } else {
+        lua_pushnil(L); // Not found
+        return 1;
     }
-    std::string text = lua_tostring(L, 1);
-
-    for (char c : text) {
-        editor->insertChar(c);
-    }
-    return 0;
 }
 
-int lua_get_current_line_text(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
+// Define the global static map outside any function
+std::map<std::string, std::string> Editor::plugin_data_storage;
 
-    std::string line_text = "";
-    if (editor->cursorY >= 0 && editor->cursorY < editor->lines.size()) {
-        line_text = editor->lines[editor->cursorY];
-    }
-    lua_pushstring(L, line_text.c_str());
-    return 1; // Return 1 value (the string)
-}
 
-int lua_get_cursor_x(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
-    lua_pushinteger(L, editor->cursorX);
-    return 1;
-}
-
-int lua_get_cursor_y(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
-    lua_pushinteger(L, editor->cursorY);
-    return 1;
-}
-
-int lua_get_line_count(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
-    lua_pushinteger(L, editor->lines.size());
-    return 1;
-}
-
-int lua_get_current_filename(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
-    lua_pushstring(L, editor->filename.c_str());
-    return 1;
-}
-
-int lua_refresh_screen(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
-    editor->refreshScreen();
-    return 0;
-}
-
-int lua_force_full_redraw(lua_State* L) {
-    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
-    if (!editor) return luaL_error(L, "Editor instance not found.");
-    for(auto& s : editor->prevDrawnLines) s.assign(editor->screenCols, ' ');
-    editor->prevStatusMessage = "";
-    editor->prevMessageBarMessage = "";
-    return 0;
-}
-
-int lua_get_current_time_ms(lua_State* L) {
-    lua_pushinteger(L, GetTickCount64());
-    return 1;
-}
-
+// Update the `editor_lib` array to include all new functions
 static const luaL_Reg editor_lib[] = {
     {"set_status_message", lua_set_status_message},
+    {"get_current_time_ms", lua_get_current_time_ms},
+    {"refresh_screen", lua_refresh_screen},
+    {"force_full_redraw", lua_force_full_redraw}, // Old method for full redraw, should call internal
     {"insert_text", lua_insert_text},
     {"get_current_line_text", lua_get_current_line_text},
+    {"get_line_count", lua_get_line_count},
     {"get_cursor_x", lua_get_cursor_x},
     {"get_cursor_y", lua_get_cursor_y},
-    {"get_line_count", lua_get_line_count},
     {"get_current_filename", lua_get_current_filename},
-    {"refresh_screen", lua_refresh_screen},
-    {"force_full_redraw", lua_force_full_redraw},
-    {"get_current_time_ms", lua_get_current_time_ms},
-    {NULL, NULL}  // Sentinel
+
+    // New functions
+    {"get_line", lua_get_line},
+    {"set_line", lua_set_line},
+    {"insert_line", lua_insert_line},
+    {"delete_line", lua_delete_line},
+    {"get_buffer_content", lua_get_buffer_content},
+    {"set_buffer_content", lua_set_buffer_content},
+    {"get_char_at", lua_get_char_at},
+    {"get_tab_stop_width", lua_get_tab_stop_width},
+    {"set_cursor_position", lua_set_cursor_position},
+    {"set_row_offset", lua_set_row_offset},
+    {"set_col_offset", lua_set_col_offset},
+    {"get_row_offset", lua_get_row_offset},
+    {"get_col_offset", lua_get_col_offset},
+    {"center_view_on_cursor", lua_center_view_on_cursor},
+    {"open_file", lua_open_file},
+    {"save_file", lua_save_file},
+    {"is_dirty", lua_is_dirty},
+    {"get_directory_path", lua_get_directory_path},
+    {"set_directory_path", lua_set_directory_path},
+    {"list_directory", lua_list_directory},
+    {"create_file", lua_create_file},
+    {"create_directory", lua_create_directory},
+    {"delete_file", lua_delete_file},
+    {"delete_directory", lua_delete_directory},
+    {"prompt", lua_prompt_user}, // 'prompt' is a nicer Lua name
+    {"show_message", lua_show_message},
+    {"show_error", lua_show_error},
+    {"get_screen_size", lua_get_screen_size},
+    {"send_terminal_input", lua_send_terminal_input},
+    {"toggle_terminal", lua_toggle_terminal},
+    {"path_join", lua_path_join},
+    {"file_exists", lua_file_exists},
+    {"is_directory", lua_is_directory},
+    {"execute_command", lua_execute_command},
+    {"register_event", lua_register_event_handler},
+    {"is_ctrl_pressed", lua_is_ctrl_pressed},
+    {"save_plugin_data", lua_save_plugin_data},
+    {"load_plugin_data", lua_load_plugin_data},
+    {NULL, NULL}
 };
-///
+#pragma endregion
+
+
 
 Editor::Editor() : 
     cursorX(0), 
@@ -178,6 +720,44 @@ Editor::Editor() :
 Editor::~Editor() {
     finalizeLua();
     stopTerminal();
+}
+
+void Editor::triggerEvent(const std::string& eventName, int param) {
+    std::vector<LuaCallback>* callbacks = nullptr;
+    if (eventName == "on_key_press") callbacks = &onKeyPressCallbacks;
+    else if (eventName == "on_mode_changed") callbacks = &onModeChangedCallbacks;
+    // ... add more if they take int params
+
+    if (callbacks) {
+        for (const auto& callback : *callbacks) {
+            lua_rawgeti(callback.L_state, LUA_REGISTRYINDEX, callback.funcRef);
+            lua_pushinteger(callback.L_state, param);
+            int status = lua_pcall(callback.L_state, 1, 0, 0); // 1 arg, 0 results
+            if (status != LUA_OK) {
+                std::cerr << "Error in Lua event '" << eventName << "': " << lua_tostring(callback.L_state, -1) << std::endl;
+                lua_pop(callback.L_state, 1);
+            }
+        }
+    }
+}
+
+void Editor::triggerEvent(const std::string& eventName, const std::string& param) {
+    std::vector<LuaCallback>* callbacks = nullptr;
+    if (eventName == "on_file_opened") callbacks = &onFileOpenedCallbacks;
+    else if (eventName == "on_file_saved") callbacks = &onFileSavedCallbacks;
+    // ... add more if they take string params
+
+    if (callbacks) {
+        for (const auto& callback : *callbacks) {
+            lua_rawgeti(callback.L_state, LUA_REGISTRYINDEX, callback.funcRef);
+            lua_pushstring(callback.L_state, param.c_str());
+            int status = lua_pcall(callback.L_state, 1, 0, 0); // 1 arg, 0 results
+            if (status != LUA_OK) {
+                std::cerr << "Error in Lua event '" << eventName << "': " << lua_tostring(callback.L_state, -1) << std::endl;
+                lua_pop(callback.L_state, 1);
+            }
+        }
+    }
 }
 
 void Editor::initializeLua() {
