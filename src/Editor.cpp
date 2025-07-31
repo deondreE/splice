@@ -876,7 +876,7 @@ Editor::Editor() :
     currentLineEnding(LE_CRLF),
     hChildStdinRead(NULL), hChildStdinWrite(NULL), hChildStdoutRead(NULL), hChildStdoutWrite(NULL),
     hConsoleInput(INVALID_HANDLE_VALUE), originalConsoleMode(0),
-    currentFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE), // Default white
+    currentFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE),
     currentBgColor(0),
     currentBold(false),
     defaultFgColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE),
@@ -1280,6 +1280,26 @@ void Editor::drawScreenContent() {
 
     drawStatusBar();
     drawMessageBar();
+
+    SHORT screenCursorY = (SHORT)(cursorY - rowOffset);
+    int renderedCursorX = cxToRx(cursorY, cursorX); // Get the rendered position of cursorX
+    SHORT screenCursorX = (SHORT)(lineNumberWidth + renderedCursorX - colOffset);
+
+    screenCursorX = std::max((SHORT)lineNumberWidth, screenCursorX);
+    screenCursorX = std::min((SHORT)(screenCols - 1), screenCursorX);
+    screenCursorY = std::max((SHORT)0, screenCursorY); // Cannot go above top of text area
+    screenCursorY = std::min((SHORT)(screenRows - 3), screenCursorY); // Cannot go below bottom of text area (-2 for bars, -1 for 0-indexing)
+
+    COORD cursorPosition = { screenCursorX, screenCursorY };
+    if (!SetConsoleCursorPosition(hConsole, cursorPosition)) {
+        // std::cerr << "SetConsoleCursorPosition failed: " + GetLastError() << std::end;
+    }
+
+    CONSOLE_CURSOR_INFO cursorInfo;
+    if (GetConsoleCursorInfo(hConsole, &cursorInfo)) {
+        cursorInfo.bVisible = TRUE;
+        SetConsoleCursorInfo(hConsole, &cursorInfo);
+    }
 }
 
 void Editor::startSearch() {
@@ -1531,95 +1551,69 @@ void Editor::scroll() {
     }
 }
 
-void Editor::moveCursor(int key) {
-    int oldCursorX = cursorX;
-    int oldCursorY = cursorY;
-    std::string currentLine = (cursorY < lines.size()) ? lines[cursorY] : lines.front();
+void Editor::moveCursor(int key_code) {
+    bool cursorMoved = false;
 
-    switch (key) {
-    case ARROW_LEFT:
-        if (cursorX > 0) {
-            // To move left, decrement cursorX.
-            // If the character at cursorX-1 is a tab,
-            // this is fine for internal storage.
-            cursorX--;
-        }
-        else if (cursorY > 0) {
-            cursorY--;
-            cursorX = lines[cursorY].length(); // Move to end of previous line (char index)
-        }
-        break;
-    case ARROW_RIGHT:
-        if (cursorY < lines.size() && cursorX < currentLine.length()) {
-            // To move right, increment cursorX.
-            // This correctly moves to the next character index.
-            cursorX++;
-        }
-        else if (cursorY < lines.size() - 1) { // Move to beginning of next line
-            cursorY++;
-            cursorX = 0;
-        }
-        break;
-    case ARROW_UP:
+    switch (key_code) {
+    case VK_UP:
         if (cursorY > 0) {
-            // When moving up/down, we want the cursor to try and stay at the
-            // *same visual column* if possible.
-            // So, first convert current cx to rx, then convert that rx to new cx on target line.
-            int currentRx = cxToRx(cursorY, cursorX);
             cursorY--;
-            if (cursorY < lines.size()) {
-                cursorX = rxToCx(cursorY, currentRx); // Find the character index closest to the current rendered column
-            }
-            else {
-                cursorX = 0; // If somehow moved past valid lines, reset
-            }
+            cursorMoved = true;
         }
         break;
-    case ARROW_DOWN:
-        if (cursorY < lines.size() - 1) {
-            // Same logic as ARROW_UP
-            int currentRx = cxToRx(cursorY, cursorX);
+    case VK_DOWN:
+        if (cursorY < lines.size() - 1) { // Ensure cursor doesn't go past the last line
             cursorY++;
-            if (cursorY < lines.size()) {
-                cursorX = rxToCx(cursorY, currentRx); // Find the character index closest to the current rendered column
-            }
-            else {
-                cursorX = 0;
-            }
+            cursorMoved = true;
         }
         break;
-    case HOME_KEY:
-        cursorX = 0; // Always character index 0
-        break;
-    case END_KEY:
-        if (cursorY < lines.size()) {
-            cursorX = lines[cursorY].length(); // Always end of character string
+    case VK_LEFT:
+        if (cursorX > 0) {
+            cursorX--;
+            cursorMoved = true;
+        }
+        else if (cursorY > 0) { // Move to end of previous line
+            cursorY--;
+            cursorX = (int)lines[cursorY].length();
+            cursorMoved = true;
         }
         break;
-    case PAGE_UP:
-    case PAGE_DOWN: {
-        int currentRx = cxToRx(cursorY, cursorX); // Store current rendered X before jump
-        int times = screenRows - 2;
-        if (key == PAGE_UP) {
-            cursorY = std::max(0, cursorY - times);
+    case VK_RIGHT:
+        if (cursorX < lines[cursorY].length()) { // Move within current line
+            cursorX++;
+            cursorMoved = true;
         }
-        else { // PAGE_DOWN
-            cursorY = std::min((int)lines.size() - 1, cursorY + times);
-        }
-        // After changing Y, re-calculate X based on old rendered position
-        if (cursorY < lines.size()) {
-            cursorX = rxToCx(cursorY, currentRx);
-        }
-        else if (lines.empty()) { // Edge case: empty file, moved page
+        else if (cursorY < lines.size() - 1) { // Move to start of next line
+            cursorY++;
             cursorX = 0;
-            cursorY = 0;
+            cursorMoved = true;
         }
-        else { // Landed on an invalid line, default to end of last line
-            cursorY = lines.size() - 1;
-            cursorX = lines[cursorY].length();
-        }
+        break;
+    case VK_HOME:
+        cursorX = 0;
+        cursorMoved = true;
+        break;
+    case VK_END:
+        cursorX = (int)lines[cursorY].length();
+        cursorMoved = true;
         break;
     }
+
+    // Clamp cursorX to the length of the new line (important after vertical moves)
+    if (cursorY >= 0 && cursorY < lines.size()) {
+        cursorX = std::min(cursorX, (int)lines[cursorY].length());
+    }
+    else {
+        // If lines is empty or cursorY invalid, reset cursorX/Y to 0
+        cursorY = 0;
+        cursorX = 0;
+        if (lines.empty()) {
+            lines.push_back(""); // Ensure there's always at least one empty line
+        }
+    }
+
+    if (cursorMoved) {
+        scroll(); // Trigger scroll logic and screen redraw
     }
 }
 
@@ -1650,6 +1644,7 @@ void Editor::insertNewline() {
     statusMessage = "";
     statusMessageTime = 0;
     dirty = true;
+    scroll();
 }
 
 void Editor::deleteChar() {
@@ -1661,6 +1656,8 @@ void Editor::deleteChar() {
     if (cursorX > 0) {
         lines[cursorY].erase(cursorX - 1, 1);
         cursorX--;
+        dirty = true;
+        scroll();
     }
     else {
         cursorX = lines[cursorY - 1].length();
@@ -1687,6 +1684,8 @@ void Editor::deleteForwardChar() {
         lines[cursorY] += lines[cursorY + 1];
         lines.erase(lines.begin() + cursorY + 1);
         calculateLineNumberWidth();
+        dirty = true; 
+        scroll();
     }
     statusMessage = "";
     statusMessageTime = 0;
@@ -1744,12 +1743,14 @@ bool Editor::openFile(const std::string& path) {
     statusMessageTime = GetTickCount64();
 
     scroll();
+    drawScreenContent();
 
     force_full_redraw_internal();
 
     dirty = false;
     return true;
 }
+
 bool Editor::saveFile() {
     if (filename.empty()) {
         show_error("Cannot save: No filename specified. Use Ctrl-O to open/create a file.", 5000);
@@ -3015,7 +3016,60 @@ void Editor::processInput(int raw_key_code, char ascii_char, DWORD control_key_s
         if (ascii_char != 0 && ascii_char >= 32 && ascii_char <= 126) {
             if (!ctrl_pressed && !alt_pressed_local) {
                 insertChar(ascii_char);
+                scroll();
+                return;
             }
+        }
+
+        switch (raw_key_code) {
+        case VK_UP:
+            if (cursorY > 0) {
+                cursorY--;
+                cursorX = std::min(cursorX, (int)lines[cursorY].length());
+            }
+            scroll();
+            break;
+        case VK_DOWN:
+            if (cursorY < lines.size()) {
+                cursorY++;
+                cursorX = std::min(cursorX, (int)lines[cursorY].length());
+            }
+            scroll();
+            break;
+        case VK_LEFT:
+            if (cursorX > 0) {
+                cursorX--;
+            }
+            else if (cursorY > 0) {
+                cursorY--;
+                cursorX = (int)lines[cursorY].length();
+            }
+            scroll();
+            break;
+        case VK_RIGHT:
+            if (cursorX < lines[cursorY].length()) {
+                cursorX++;
+            }
+            else if (cursorY < lines.size() - 1) { // Move to start of next line
+                cursorY++;
+                cursorX = 0;
+            }
+            scroll();
+            break;
+        case VK_HOME:
+            cursorX = 0;
+            scroll();
+            break;
+        case VK_BACK:
+            deleteChar();
+            scroll();
+            break;
+        case VK_DELETE:
+            deleteChar();
+            scroll();
+            break;
+        default: 
+            break;
         }
     }
     else if (mode == PROMPT_MODE) {
