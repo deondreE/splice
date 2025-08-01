@@ -93,6 +93,40 @@ struct ConsoleFontInfo {
     short fontSizeY;
 };
 
+enum TextStyleFlags {
+	STYLE_NONE = 0,
+	STYLE_BOLD = 1 << 0,
+	STYLE_ITALIC = 1 << 1,
+	STYLE_UNDERLINE = 1 << 2,
+};
+
+struct TextStyling {
+	int startCol;
+	int endCol;
+	unsigned int fgColor;
+	unsigned int bgColor;
+	int styleFlags;
+};
+
+enum TextDecorationType {
+	DECORATION_NONE,
+	DECORATION_ERROR_UNDERLINE,
+	DECORATION_WARNING_UNDERLINE,
+	DECORATION_INFO_OVERLAY,    // e.g., for semantic highlights, dimming
+	DECORATION_MATCH_HIGHLIGHT, // e.g., for search results
+	// Add more as needed (e.g., gutter icons, line numbers with backgrounds)
+};
+
+struct TextDecoration {
+	std::string id;       // Unique ID for this decoration instance
+	int startCol;         // 1-based start column
+	int endCol;           // 1-based end column (exclusive)
+	TextDecorationType type; // Type of decoration
+	std::string tooltip;  // Message for tooltip on hover
+	unsigned int color;   // Primary color for the decoration (e.g., underline color)
+	// Add more properties as needed, like `bgColor` for overlays
+};
+
 struct Editor {
 public:
     static std::map<std::string, std::string> plugin_data_storage;
@@ -170,6 +204,8 @@ public:
     EditorMode lastRenderedMode = EDIT_MODE;
 
     ConsoleFontInfo currentFont;
+	std::map<int, std::vector<TextStyling>> lineStyling;
+	std::map<int, std::vector<TextDecoration>> lineDecorations;
 
 	Editor();
 	~Editor();
@@ -250,6 +286,14 @@ public:
 
     bool should_exit = false;
 
+	void setTextForegroundColor(int lineNum, int startCol, int endCol, unsigned int rgbColor);
+	void setTextBackgroundColor(int lineNum, int startCol, int endCol, unsigned int rgbColor); // Optional, but good to have
+	void setTextStyles(int lineNum, int startCol, int endCol, int styleFlags);
+	void clearLineStyling(int lineNum, int startCol = 1, int endCol = -1); // -1 means until end of line
+	void addTextDecoration(const std::string& id, int lineNum, int startCol, int endCol, TextDecorationType type, const std::string& tooltip = "", unsigned int color = 0);
+	void clearDecorations(const std::string& idPrefix = ""); // Clear all if prefix is empty
+	void showTooltip(int screenX, int screenY, const std::string& message, ULONGLONG duration_ms);
+
 private:
 	void drawScreenContent();
 	void drawStatusBar();
@@ -262,4 +306,6 @@ private:
 	std::string getRenderedLine(int fileRow);
 
 	void drawFileExplorer();
+
+	void applyStylingInternal(int lineNum, int startCol, int endCol, std::function<void(TextStyling&)> applyFunc);
 };

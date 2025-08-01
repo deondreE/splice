@@ -83,11 +83,12 @@ int lua_save_plugin_data(lua_State* L);
 int lua_load_plugin_data(lua_State* L);
 
 
-// Array to register all functions in Lua
-// This should be extern if defined in a .cpp file and used here,
-// or defined directly in the .cpp file where it's used.
-// For now, keep it in Editor.cpp near exposeEditorToLua()
-// static const luaL_Reg editor_lib[]; // This declaration would go here if defined externally
-                                     // But it's better to keep it in Editor.cpp for implementation details.
+// Text Style Declaration api
+int lua_set_text_color(lua_State* L);
+int lua_set_text_style(lua_State* L);
+int lua_clear_text_styling(lua_State* L);
+int lua_add_decoration(lua_State* L);
+int lua_clear_decoration(lua_State* L);
+int lua_show_tooltip(lua_State* L);
 
 #endif // LUA_API_H

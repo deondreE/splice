@@ -29,6 +29,161 @@ int lua_get_current_filename(lua_State* L) {
     return 1;
 }
 
+unsigned int get_lua_color(lua_State* L, int arg_idx) {
+    if (lua_type(L, arg_idx) == LUA_TSTRING) {
+        std::string hex_color = lua_tostring(L, arg_idx); 
+        // remove #
+        if (hex_color.length() > 0 && hex_color[0] == '#') {
+            hex_color = hex_color.substr(1);
+        }
+        if (hex_color.length() == 6) {
+            try {
+                return static_cast<unsigned int>(std::stoul(hex_color, nullptr, 16));
+            }
+            catch (...) {
+                return 0; // Default to black or error color
+            }
+        }
+    }
+    else if (lua_type(L, arg_idx) == LUA_TNUMBER) {
+        return static_cast<unsigned int>(lua_tointeger(L, arg_idx)); // Assume direct integer is already RGB
+    }
+    return 0;
+}
+
+int lua_set_text_color(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+    if (!lua_isinteger(L, 2)) return luaL_error(L, "Argument #2 (start_col) must be an integer.");
+    if (!lua_isinteger(L, 3)) return luaL_error(L, "Argument #3 (end_col) must be an integer.");
+    // Color can be string (hex) or integer (RGB)
+    if (!lua_isstring(L, 4) && !lua_isinteger(L, 4)) return luaL_error(L, "Argument #4 (color) must be a string (hex) or integer (RGB).");
+
+    int line_num = lua_tointeger(L, 1); // 1-based from Lua
+    int start_col = lua_tointeger(L, 2); // 1-based from Lua
+    int end_col = lua_tointeger(L, 3);   // 1-based from Lua (exclusive)
+    unsigned int color = get_lua_color(L, 4);
+
+    editor->setTextForegroundColor(line_num, start_col, end_col, color);
+    editor->force_full_redraw_internal(); // Styling changes require redraw
+    return 0;
+}
+
+int lua_set_text_style(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+    if (!lua_isinteger(L, 2)) return luaL_error(L, "Argument #2 (start_col) must be an integer.");
+    if (!lua_isinteger(L, 3)) return luaL_error(L, "Argument #3 (end_col) must be an integer.");
+    if (!lua_isinteger(L, 4)) return luaL_error(L, "Argument #4 (style_flags) must be an integer.");
+
+    int line_num = lua_tointeger(L, 1);
+    int start_col = lua_tointeger(L, 2);
+    int end_col = lua_tointeger(L, 3);
+    int style_flags = lua_tointeger(L, 4);
+
+    editor->setTextStyles(line_num, start_col, end_col, style_flags);
+    editor->force_full_redraw_internal();
+    return 0;
+}
+
+int lua_add_decoration(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    if (!lua_isstring(L, 1)) return luaL_error(L, "Argument #1 (decoration_id) must be a string.");
+    if (!lua_isinteger(L, 2)) return luaL_error(L, "Argument #2 (line_number) must be an integer.");
+    if (!lua_isinteger(L, 3)) return luaL_error(L, "Argument #3 (start_col) must be an integer.");
+    if (!lua_isinteger(L, 4)) return luaL_error(L, "Argument #4 (end_col) must be an integer.");
+    if (!lua_isstring(L, 5)) return luaL_error(L, "Argument #5 (decoration_type) must be a string.");
+
+    std::string id = lua_tostring(L, 1);
+    int line_num = lua_tointeger(L, 2);
+    int start_col = lua_tointeger(L, 3);
+    int end_col = lua_tointeger(L, 4);
+    std::string type_str = lua_tostring(L, 5);
+
+    std::string tooltip = "";
+    if (lua_isstring(L, 6)) {
+        tooltip = lua_tostring(L, 6);
+    }
+    unsigned int color = 0; // Default to black or error_color
+    if (lua_isstring(L, 7) || lua_isinteger(L, 7)) {
+        color = get_lua_color(L, 7);
+    }
+
+
+    TextDecorationType type = DECORATION_NONE;
+    if (type_str == "error_underline") type = DECORATION_ERROR_UNDERLINE;
+    else if (type_str == "warning_underline") type = DECORATION_WARNING_UNDERLINE;
+    else if (type_str == "info_overlay") type = DECORATION_INFO_OVERLAY;
+    else if (type_str == "match_highlight") type = DECORATION_MATCH_HIGHLIGHT;
+    // Add more type mappings as needed
+
+    editor->addTextDecoration(id, line_num, start_col, end_col, type, tooltip, color);
+    editor->force_full_redraw_internal();
+    return 0;
+}
+
+int lua_clear_text_styling(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (line_number) must be an integer.");
+
+    int line_num = lua_tointeger(L, 1);
+    int start_col = 1; // Default: clear from beginning
+    int end_col = -1; // Default: clear to end
+
+    if (lua_isinteger(L, 2)) {
+        start_col = lua_tointeger(L, 2);
+        if (lua_isinteger(L, 3)) {
+            end_col = lua_tointeger(L, 3);
+        }
+    }
+
+    editor->clearLineStyling(line_num, start_col, end_col);
+    editor->force_full_redraw_internal();
+    return 0;
+}
+
+int lua_show_tooltip(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    if (!lua_isinteger(L, 1)) return luaL_error(L, "Argument #1 (x_screen_pixel) must be an integer.");
+    if (!lua_isinteger(L, 2)) return luaL_error(L, "Argument #2 (y_screen_pixel) must be an integer.");
+    if (!lua_isstring(L, 3)) return luaL_error(L, "Argument #3 (message) must be a string.");
+
+    int x = lua_tointeger(L, 1);
+    int y = lua_tointeger(L, 2);
+    std::string message = lua_tostring(L, 3);
+    ULONGLONG duration_ms = 0; // 0 means transient, might need a proper tooltip system or use status bar for simplicity for now
+    if (lua_isinteger(L, 4)) {
+        duration_ms = lua_tointeger(L, 4);
+    }
+
+    editor->showTooltip(x, y, message, duration_ms);
+    return 0;
+}
+
+int lua_clear_decorations(lua_State* L) {
+    Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
+    if (!editor) return luaL_error(L, "Editor instance not found.");
+
+    std::string id_prefix = "";
+    if (lua_isstring(L, 1)) {
+        id_prefix = lua_tostring(L, 1);
+    }
+
+    editor->clearDecorations(id_prefix);
+    editor->force_full_redraw_internal();
+    return 0;
+}
+
 int lua_set_status_message(lua_State* L) {
     Editor* editor = (Editor*)lua_touserdata(L, lua_upvalueindex(1));
     if (!editor) return luaL_error(L, "Editor instance not found.");
@@ -841,6 +996,12 @@ static const luaL_Reg editor_lib[] = {
     {"set_console_font", lua_set_console_font},
     {"get_current_console_font", lua_get_current_console_font},
     {"get_available_console_fonts", lua_get_available_console_fonts},
+    {"set_text_color",      lua_set_text_color},
+    {"set_text_style",      lua_set_text_style},
+    {"clear_text_styling",  lua_clear_text_styling},
+    {"add_decoration",      lua_add_decoration},
+    {"clear_decorations",   lua_clear_decorations},
+    {"show_tooltip",        lua_show_tooltip},
 
     {NULL, NULL}
 };
@@ -990,6 +1151,54 @@ void Editor::triggerEvent(const std::string& eventName, int param) {
     }
 }
 
+WORD mapRgbToConsoleColor(unsigned int rgb) {
+    // Basic mapping to 16 console colors.
+    // This is a simplified approach. A true mapping would involve
+    // calculating Euclidean distance in RGB space to find the closest match.
+    // For now, let's use the most common 8-color base + intensity.
+
+    // Extract R, G, B components
+    unsigned char r = (rgb >> 16) & 0xFF;
+    unsigned char g = (rgb >> 8) & 0xFF;
+    unsigned char b = rgb & 0xFF;
+
+    WORD attributes = 0;
+
+    // Check for intensity (brightness)
+    bool is_bright = (r > 128 || g > 128 || b > 128);
+
+    // Approximate basic colors
+    if (r > g && r > b) attributes |= FOREGROUND_RED;
+    if (g > r && g > b) attributes |= FOREGROUND_GREEN;
+    if (b > r && b > g) attributes |= FOREGROUND_BLUE;
+
+    // Special cases for combinations and grayscale
+    if (r > 128 && g > 128 && b < 128) attributes = FOREGROUND_RED | FOREGROUND_GREEN; // Yellow
+    else if (r > 128 && b > 128 && g < 128) attributes = FOREGROUND_RED | FOREGROUND_BLUE; // Magenta
+    else if (g > 128 && b > 128 && r < 128) attributes = FOREGROUND_GREEN | FOREGROUND_BLUE; // Cyan
+    else if (r == g && g == b) { // Grayscale
+        if (r > 128) attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; // White
+        else attributes = 0; // Black
+    }
+    // If no strong primary, try simple combinations
+    else if (r > 64 && g > 64) attributes = FOREGROUND_RED | FOREGROUND_GREEN;
+    else if (r > 64 && b > 64) attributes = FOREGROUND_RED | FOREGROUND_BLUE;
+    else if (g > 64 && b > 64) attributes = FOREGROUND_GREEN | FOREGROUND_BLUE;
+
+    if (is_bright) attributes |= FOREGROUND_INTENSITY;
+
+    // Fallback if no specific color is detected
+    if (attributes == 0 && (r + g + b > 0)) {
+        if (is_bright) attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY; // Bright white
+        else attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; // Dim white
+    }
+    else if (attributes == 0 && (r + g + b == 0)) {
+        attributes = 0; // Black
+    }
+
+    return attributes;
+}
+
 void Editor::triggerEvent(const std::string& eventName, const std::string& param) {
     std::vector<LuaCallback>* callbacks = nullptr;
     if (eventName == "on_file_opened") callbacks = &onFileOpenedCallbacks;
@@ -1024,6 +1233,16 @@ void Editor::exposeEditorToLua() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, editor_lib, 1);
     lua_setglobal(L, "editor_api");
+
+    lua_getglobal(L, "editor_api");
+    if (lua_istable(L, -1)) {
+        lua_pushinteger(L, STYLE_NONE);      lua_setfield(L, -2, "STYLE_NONE");
+        lua_pushinteger(L, STYLE_BOLD);      lua_setfield(L, -2, "STYLE_BOLD");
+        lua_pushinteger(L, STYLE_ITALIC);    lua_setfield(L, -2, "STYLE_ITALIC");
+        lua_pushinteger(L, STYLE_UNDERLINE); lua_setfield(L, -2, "STYLE_UNDERLINE");
+        // Add other style flags if you implement them
+    }
+    lua_pop(L, 1);
 
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "path");
@@ -1193,25 +1412,29 @@ void Editor::drawScreenContent() {
 
     int effectiveScreenCols = screenCols - lineNumberWidth;
 
-    for (int i = 0; i < screenRows - 2; ++i) {
+    for (int i = 0; i < screenRows - 2; ++i) { // Iterate through visible screen rows for content
         int fileRow = rowOffset + i;
         std::string fullLineContentToDraw = "";
-        std::vector<WORD> fullLineAttributes(screenCols);
+        std::vector<WORD> fullLineAttributes(screenCols); // This vector holds attributes for the ENTIRE screen line
 
+        // --- 1. Draw Line Number ---
         std::string lineNumberStr;
         std::ostringstream ss_lineNumber;
         if (fileRow >= 0 && fileRow < lines.size()) {
             ss_lineNumber << std::setw(lineNumberWidth - 1) << (fileRow + 1) << " ";
-        } else {
+        }
+        else {
             ss_lineNumber << std::string(lineNumberWidth - 1, ' ') << "~";
         }
         lineNumberStr = ss_lineNumber.str();
         fullLineContentToDraw += lineNumberStr;
 
+        // Apply default attributes to the line number part
         for (int k = 0; k < lineNumberStr.length(); ++k) {
             fullLineAttributes[k] = defaultFgColor | defaultBgColor;
         }
 
+        // --- 2. Get Rendered Text Content ---
         std::string renderedTextContent = "";
         if (fileRow >= 0 && fileRow < lines.size()) {
             std::string fullRenderedLine = getRenderedLine(fileRow);
@@ -1230,11 +1453,18 @@ void Editor::drawScreenContent() {
         }
         fullLineContentToDraw += renderedTextContent;
 
-        int currentScreenCol = lineNumberStr.length();
+        // --- 3. Initialize Text Attributes (Default + Search Highlight) ---
+        // These attributes apply to the 'renderedTextContent' part of the line.
+        // Index `k` here refers to the index within `renderedTextContent` (0 to length-1)
         for (int k = 0; k < renderedTextContent.length(); ++k) {
-            WORD current_attributes = defaultFgColor | defaultBgColor;
-            bool isHighlight = false;
+            WORD current_attributes = defaultFgColor | defaultBgColor; // Start with editor defaults
 
+            // Calculate the character's absolute rendered position on the line (before screen clipping)
+            // This is needed for search highlights and custom styling ranges.
+            int charGlobalRenderedPos = colOffset + k;
+
+            // Apply search highlight
+            bool isSearchHighlight = false;
             if (!searchQuery.empty() && currentMatchIndex != -1 && fileRow == searchResults[currentMatchIndex].first) {
                 int matchLogicalStart = searchResults[currentMatchIndex].second;
                 int matchLogicalEnd = searchResults[currentMatchIndex].second + searchQuery.length();
@@ -1242,24 +1472,139 @@ void Editor::drawScreenContent() {
                 int matchRenderedStart = cxToRx(fileRow, matchLogicalStart);
                 int matchRenderedEnd = cxToRx(fileRow, matchLogicalEnd);
 
-                int charGlobalRenderedPos = (currentScreenCol + k) - lineNumberStr.length() + colOffset;
-
                 if (charGlobalRenderedPos >= matchRenderedStart && charGlobalRenderedPos < matchRenderedEnd) {
-                    isHighlight = true;
+                    isSearchHighlight = true;
                 }
             }
-
-            if (isHighlight) {
-                current_attributes = BG_YELLOW | BLACK;
+            if (isSearchHighlight) {
+                current_attributes = BG_YELLOW | BLACK; // Override with search highlight
             }
-            fullLineAttributes[currentScreenCol + k] = current_attributes;
+            // Store this initial attribute for the character
+            fullLineAttributes[lineNumberStr.length() + k] = current_attributes;
         }
 
+        // --- 4. Apply Custom Text Styling (from lineStyling map) ---
+        // Iterate over custom stylings for this line and apply them
+        auto it_styling = lineStyling.find(fileRow);
+        if (it_styling != lineStyling.end()) {
+            for (const auto& styling : it_styling->second) {
+                // Convert styling range to rendered coordinates
+                int styleRenderedStart = cxToRx(fileRow, styling.startCol);
+                int styleRenderedEnd = cxToRx(fileRow, styling.endCol);
+
+                // Determine intersection with the *visible portion* of the rendered line (based on colOffset)
+                int intersectionStartRendered = std::max(styleRenderedStart, colOffset);
+                int intersectionEndRendered = std::min(styleRenderedEnd, colOffset + effectiveScreenCols);
+
+                // Convert intersection back to indices relative to the `renderedTextContent` string
+                // `textContentIdxStart` is the starting index within `renderedTextContent` that needs styling.
+                int textContentIdxStart = intersectionStartRendered - colOffset;
+                int textContentIdxEnd = intersectionEndRendered - colOffset;
+
+                for (int k_attr = std::max(0, textContentIdxStart); k_attr < std::min((int)renderedTextContent.length(), textContentIdxEnd); ++k_attr) {
+                    // Get the current attributes for this character from `fullLineAttributes`
+                    // We need to ensure we're accessing the correct offset within `fullLineAttributes`
+                    WORD current_attr_target_idx = lineNumberStr.length() + k_attr;
+                    if (current_attr_target_idx >= fullLineAttributes.size()) continue; // Should not happen with correct sizing
+
+                    WORD current_attr = fullLineAttributes[current_attr_target_idx];
+
+                    // Apply foreground color if specified
+                    if (styling.fgColor != 0) { // Assuming 0 means not specified or transparent (actual default might be 0xFFFFFF)
+                        current_attr = (current_attr & (BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY)); // Preserve existing background
+                        current_attr |= mapRgbToConsoleColor(styling.fgColor);
+                    }
+                    // Apply background color if specified
+                    if (styling.bgColor != 0) {
+                        current_attr = (current_attr & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY)); // Preserve existing foreground
+                        current_attr |= (mapRgbToConsoleColor(styling.bgColor) << 4); // Shift for background
+                    }
+
+                    // Apply styles (bold, italic, underline - note: italic/underline usually not supported by default console)
+                    if (styling.styleFlags & STYLE_BOLD) {
+                        current_attr |= FOREGROUND_INTENSITY; // Bold usually maps to intensity
+                    }
+                    // Implement visual cues for italic/underline if possible (e.g., custom char set, different background, or skip)
+
+                    fullLineAttributes[current_attr_target_idx] = current_attr;
+                }
+            }
+        }
+
+        // --- 5. Apply Decorations (e.g., underlines) ---
+        auto it_decorations = lineDecorations.find(fileRow);
+        if (it_decorations != lineDecorations.end()) {
+            for (const auto& decoration : it_decorations->second) {
+                int decorRenderedStart = cxToRx(fileRow, decoration.startCol);
+                int decorRenderedEnd = cxToRx(fileRow, decoration.endCol);
+
+                int intersectionStartRendered = std::max(decorRenderedStart, colOffset);
+                int intersectionEndRendered = std::min(decorRenderedEnd, colOffset + effectiveScreenCols);
+
+                int textContentIdxStart = intersectionStartRendered - colOffset;
+                int textContentIdxEnd = intersectionEndRendered - colOffset;
+
+                for (int k_decor = std::max(0, textContentIdxStart); k_decor < std::min((int)renderedTextContent.length(), textContentIdxEnd); ++k_decor) {
+                    WORD current_attr_target_idx = lineNumberStr.length() + k_decor;
+                    if (current_attr_target_idx >= fullLineAttributes.size()) continue;
+
+                    WORD current_attr = fullLineAttributes[current_attr_target_idx];
+
+                    // Apply decoration based on type
+                    if (decoration.type == DECORATION_ERROR_UNDERLINE) {
+                        // This is tricky for console. A common approach is to change the background color subtly,
+                        // or use a different character if you have a custom font/charset.
+                        // For a simple console, let's just make it a prominent background color.
+                        current_attr &= ~(BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY); // Clear old background
+                        current_attr |= BG_RED; // Error: red background
+                        // Optionally, set intensity or foreground color based on decoration.color
+                        if (decoration.color != 0) {
+                            current_attr &= ~(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+                            current_attr |= mapRgbToConsoleColor(decoration.color);
+                        }
+                    }
+                    else if (decoration.type == DECORATION_WARNING_UNDERLINE) {
+                        current_attr &= ~(BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY);
+                        current_attr |= BG_YELLOW; // Warning: yellow background
+                        if (decoration.color != 0) {
+                            current_attr &= ~(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+                            current_attr |= mapRgbToConsoleColor(decoration.color);
+                        }
+                    }
+                    else if (decoration.type == DECORATION_INFO_OVERLAY || decoration.type == DECORATION_MATCH_HIGHLIGHT) {
+                        // These might just apply a background color or a subtle dimming
+                        current_attr &= ~(BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY);
+                        current_attr |= BG_CYAN; // Example: info/match with cyan background
+                        if (decoration.color != 0) {
+                            current_attr &= ~(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+                            current_attr |= mapRgbToConsoleColor(decoration.color);
+                        }
+                    }
+                    // Add more decoration types as needed
+
+                    fullLineAttributes[current_attr_target_idx] = current_attr;
+                }
+            }
+        }
+
+
+        // --- 6. Pad with spaces and default attributes to fill screen width ---
         for (int k = fullLineContentToDraw.length(); k < screenCols; ++k) {
             fullLineContentToDraw += ' ';
-            fullLineAttributes[k] = defaultFgColor | defaultBgColor;
+            // Ensure padding characters also get default attributes if they weren't explicitly styled
+            // This is already done by initializing `fullLineAttributes` at the start,
+            // but this loop ensures characters past content are also default.
+            if (k < fullLineAttributes.size()) {
+                fullLineAttributes[k] = defaultFgColor | defaultBgColor;
+            }
         }
 
+
+        // --- 7. Output to Console (only if line changed) ---
+        // This comparison should ideally compare both content and attributes for a perfect diff.
+        // For simplicity, we check content change. force_full_redraw_internal is called
+        // when styling/decorations are added, which invalidates `prevDrawnLines`,
+        // forcing a full redraw, so this is generally acceptable.
         if (i >= prevDrawnLines.size() || prevDrawnLines[i] != fullLineContentToDraw) {
             COORD writePos = { 0, (SHORT)i };
             DWORD charsWritten;
@@ -1285,14 +1630,15 @@ void Editor::drawScreenContent() {
     int renderedCursorX = cxToRx(cursorY, cursorX); // Get the rendered position of cursorX
     SHORT screenCursorX = (SHORT)(lineNumberWidth + renderedCursorX - colOffset);
 
+    // Clamp cursor position to valid screen coordinates
     screenCursorX = std::max((SHORT)lineNumberWidth, screenCursorX);
     screenCursorX = std::min((SHORT)(screenCols - 1), screenCursorX);
-    screenCursorY = std::max((SHORT)0, screenCursorY); // Cannot go above top of text area
-    screenCursorY = std::min((SHORT)(screenRows - 3), screenCursorY); // Cannot go below bottom of text area (-2 for bars, -1 for 0-indexing)
+    screenCursorY = std::max((SHORT)0, screenCursorY);
+    screenCursorY = std::min((SHORT)(screenRows - 3), screenCursorY);
 
     COORD cursorPosition = { screenCursorX, screenCursorY };
     if (!SetConsoleCursorPosition(hConsole, cursorPosition)) {
-        // std::cerr << "SetConsoleCursorPosition failed: " + GetLastError() << std::end;
+        // Handle error, but often not critical for basic operation
     }
 
     CONSOLE_CURSOR_INFO cursorInfo;
@@ -3114,4 +3460,211 @@ void Editor::processInput(int raw_key_code, char ascii_char, DWORD control_key_s
             }
         }
     }
+}
+
+void Editor::applyStylingInternal(int lineNum, int startCol, int endCol, std::function<void(TextStyling&)> applyFunc) {
+    if (lineNum <= 0 || lineNum > lines.size()) {
+        return;
+    }
+    int lineIndex = lineNum - 1;
+
+    int internalStartCol = std::max(0, startCol - 1);
+    int internalEndCol = (endCol == -1) ? (int)lines[lineIndex].length() : std::max(0, endCol - 1);
+    internalEndCol = std::min(internalEndCol, (int)lines[lineIndex].length()); // Clamp to line length
+    if (internalEndCol >= internalEndCol) {
+        return;
+    }
+
+    auto& stylesOnLine = lineStyling[lineIndex];
+    std::vector<TextStyling> newStylesForLine;
+
+    for (const auto& existingStyle : stylesOnLine) {
+        if (existingStyle.endCol <= internalStartCol || existingStyle.startCol >= internalEndCol) {
+            newStylesForLine.push_back(existingStyle);
+            continue;
+        }
+
+        if (internalStartCol <= existingStyle.startCol && internalEndCol >= existingStyle.endCol) {
+            // The existing style will be fully overwritten or absorbed. Do nothing, it won't be re-added.
+            continue;
+        }
+
+        if (existingStyle.startCol < internalStartCol && existingStyle.endCol > internalEndCol) {
+            // Add part before new range
+            newStylesForLine.push_back({ existingStyle.startCol, internalStartCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            // Add part after new range
+            newStylesForLine.push_back({ internalEndCol, existingStyle.endCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            continue;
+        }
+
+        if (existingStyle.startCol < internalStartCol && existingStyle.endCol > internalStartCol) {
+            newStylesForLine.push_back({ existingStyle.startCol, internalStartCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            // The overlapping part will be handled by the new style
+            continue;
+        }
+
+        if (existingStyle.endCol > internalEndCol && existingStyle.startCol < internalEndCol) {
+            newStylesForLine.push_back({ internalEndCol, existingStyle.endCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            // The overlapping part will be handled by the new style
+            continue;
+        }
+    }
+
+    TextStyling newStyle = { internalStartCol, internalEndCol, 0, 0, 0 };
+    applyFunc(newStyle);
+    newStylesForLine.push_back(newStyle);
+
+    std::sort(newStylesForLine.begin(), newStylesForLine.end(), [](const TextStyling& a, const TextStyling& b) {
+        return a.startCol < b.startCol;
+    });
+
+    stylesOnLine = newStylesForLine;
+}
+
+void Editor::setTextForegroundColor(int lineNum, int startCol, int endCol, unsigned int rgbColor) {
+    applyStylingInternal(lineNum, startCol, endCol, [&](TextStyling& style) {
+        style.fgColor = rgbColor;
+    });
+}
+
+void Editor::setTextBackgroundColor(int lineNum, int startCol, int endCol, unsigned int rgbColor) {
+    applyStylingInternal(lineNum, startCol, endCol, [&](TextStyling& style) {
+        style.bgColor = rgbColor;
+    });
+}
+
+void Editor::setTextStyles(int lineNum, int startCol, int endCol, int styleFlags) {
+    applyStylingInternal(lineNum, startCol, endCol, [&](TextStyling& style) {
+        style.styleFlags = styleFlags;
+    });
+}
+
+void Editor::clearLineStyling(int lineNum, int startCol, int endCol) {
+    if (lineNum <= 0 || lineNum > lines.size()) {
+        return; // Invalid line number
+    }
+    int lineIndex = lineNum - 1; // 0-based for internal map
+
+    int internalStartCol = std::max(0, startCol - 1);
+    int internalEndCol = (endCol == -1) ? (int)lines[lineIndex].length() : std::max(0, endCol - 1);
+    internalEndCol = std::min(internalEndCol, (int)lines[lineIndex].length());
+
+    if (internalStartCol >= internalEndCol) {
+        return; // Empty or invalid range
+    }
+
+    auto& stylesOnLine = lineStyling[lineIndex];
+    std::vector<TextStyling> newStylesForLine;
+
+    for (const auto& existingStyle : stylesOnLine) {
+        // Case 1: No overlap with clear range, keep existing style
+        if (existingStyle.endCol <= internalStartCol || existingStyle.startCol >= internalEndCol) {
+            newStylesForLine.push_back(existingStyle);
+            continue;
+        }
+
+        // Case 2: Clear range fully contains existing style, do not add
+        if (internalStartCol <= existingStyle.startCol && internalEndCol >= existingStyle.endCol) {
+            continue; // Overwritten, don't add
+        }
+
+        // Case 3: Clear range splits existing style
+        if (existingStyle.startCol < internalStartCol && existingStyle.endCol > internalEndCol) {
+            // Add part before clear range
+            newStylesForLine.push_back({ existingStyle.startCol, internalStartCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            // Add part after clear range
+            newStylesForLine.push_back({ internalEndCol, existingStyle.endCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            continue;
+        }
+
+        // Case 4: Clear range partially overlaps left side of existing style
+        if (existingStyle.startCol < internalStartCol && existingStyle.endCol > internalStartCol) {
+            newStylesForLine.push_back({ existingStyle.startCol, internalStartCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            continue;
+        }
+
+        // Case 5: Clear range partially overlaps right side of existing style
+        if (existingStyle.endCol > internalEndCol && existingStyle.startCol < internalEndCol) {
+            newStylesForLine.push_back({ internalEndCol, existingStyle.endCol, existingStyle.fgColor, existingStyle.bgColor, existingStyle.styleFlags });
+            continue;
+        }
+    }
+    stylesOnLine = newStylesForLine;
+
+    // After clearing, consolidate/remove empty lines from map
+    if (stylesOnLine.empty()) {
+        lineStyling.erase(lineIndex);
+    }
+}
+
+void Editor::addTextDecoration(const std::string& id, int lineNum, int startCol, int endCol, TextDecorationType type, const std::string& tooltip, unsigned int color) {
+    if (lineNum <= 0 || lineNum > lines.size()) {
+        return; // Invalid line number
+    }
+    int lineIndex = lineNum - 1;
+
+    // Convert to 0-based internal indexes
+    int internalStartCol = std::max(0, startCol - 1);
+    int internalEndCol = std::max(0, endCol - 1); // Exclusive end for the API, so internal is also exclusive
+    internalEndCol = std::min(internalEndCol, (int)lines[lineIndex].length());
+
+    // Check if decoration with this ID already exists on this line, update it
+    auto& decorationsOnLine = lineDecorations[lineIndex];
+    bool updated = false;
+    for (auto& decor : decorationsOnLine) {
+        if (decor.id == id) {
+            decor.startCol = internalStartCol;
+            decor.endCol = internalEndCol;
+            decor.type = type;
+            decor.tooltip = tooltip;
+            decor.color = color;
+            updated = true;
+            break;
+        }
+    }
+
+    // If not updated, add new decoration
+    if (!updated) {
+        decorationsOnLine.push_back({ id, internalStartCol, internalEndCol, type, tooltip, color });
+    }
+
+    // Sort to keep order, though not strictly necessary for decorations initially
+    std::sort(decorationsOnLine.begin(), decorationsOnLine.end(), [](const TextDecoration& a, const TextDecoration& b) {
+        return a.startCol < b.startCol;
+        });
+}
+
+void Editor::clearDecorations(const std::string& idPrefix) {
+    if (idPrefix.empty()) {
+        // Clear all decorations on all lines
+        lineDecorations.clear();
+    }
+    else {
+        // Clear decorations matching prefix
+        for (auto& pair : lineDecorations) {
+            auto& decorationsOnLine = pair.second;
+            decorationsOnLine.erase(std::remove_if(decorationsOnLine.begin(), decorationsOnLine.end(),
+                [&](const TextDecoration& decor) {
+                    return decor.id.rfind(idPrefix, 0) == 0; // Check if string starts with prefix
+                }),
+                decorationsOnLine.end());
+        }
+        // Remove empty lines from map
+        for (auto it = lineDecorations.begin(); it != lineDecorations.end(); ) {
+            if (it->second.empty()) {
+                it = lineDecorations.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+    }
+}
+
+void Editor::showTooltip(int screenX, int screenY, const std::string& message, ULONGLONG duration_ms) {
+    // For now, let's map this to the status message.
+    // A true tooltip would require more advanced console rendering (e.g., drawing on top, or a separate window).
+    // This is a placeholder until a dedicated tooltip rendering system is in place.
+    if (duration_ms == 0) duration_ms = 3000; // Default transient for tooltip
+    show_message("Tooltip: " + message, duration_ms);
 }
